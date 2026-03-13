@@ -1,0 +1,19 @@
+---
+- hosts: all
+  become: yes  # Obligatoire pour supprimer des logiciels
+  tasks:
+    - name: Arrêter le service Nginx avant la désinstallation
+      ansible.builtin.service:
+        name: nginx
+        state: stopped
+      ignore_errors: yes  # Au cas où le service est déjà arrêté ou inexistant
+
+    - name: Désinstaller le paquet Nginx (Ubuntu et CentOS)
+      ansible.builtin.package:
+        name: nginx
+        state: absent
+
+    - name: Supprimer les fichiers de configuration (Optionnel)
+      ansible.builtin.file:
+        path: /etc/nginx
+        state: absent
