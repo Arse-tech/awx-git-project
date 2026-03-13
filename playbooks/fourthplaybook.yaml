@@ -4,7 +4,7 @@
   become_method: sudo
   become_user: root
   tasks:
-- name: Installation de Nginx (force la récupération des configs sur Debian)
+    - name: Installation de Nginx (force la récupération des configs sur Debian)
       ansible.builtin.apt:
         name: nginx
         state: present
