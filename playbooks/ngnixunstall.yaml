@@ -1,6 +1,8 @@
 ---
 - hosts: all
-  become: yes  # <--- C'EST CETTE LIGNE QUI MANQUE !
+  become: yes
+  become_method: sudo
+  become_user: root
   tasks:
     - name: Arrêter le service Nginx
       ansible.builtin.service:
