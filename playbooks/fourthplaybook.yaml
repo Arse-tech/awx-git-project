@@ -1,0 +1,36 @@
+---
+- hosts: all
+  become: yes
+  become_method: sudo
+  become_user: root
+
+  tasks:
+    - name: Gather facts
+      ansible.builtin.setup:
+
+    - name: Install Nginx package for Debian-based systems
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Install Nginx package for RedHat-based systems
+      ansible.builtin.yum:
+        name: nginx
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Start and enable Nginx service for Debian-based systems
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Start and enable Nginx service for RedHat-based systems
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: yes
+      when: ansible_os_family == "RedHat"
