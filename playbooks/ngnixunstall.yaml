@@ -4,28 +4,18 @@
   become_method: sudo
   become_user: root
   tasks:
-    - name: Suppression brutale du paquet et des dépendances
+    - name: Arrêter le service Nginx avant la désinstallation
+      ansible.builtin.service:
+        name: nginx
+        state: stopped
+      ignore_errors: yes  # Au cas où le service est déjà arrêté ou inexistant
+
+    - name: Désinstaller le paquet Nginx (Ubuntu et CentOS)
       ansible.builtin.package:
         name: nginx
         state: absent
-        purge: yes # Pour Debian/Ubuntu principalement
 
-    - name: Supprimer les fichiers binaires restants (au cas où)
+    - name: Supprimer les fichiers de configuration (Optionnel)
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: /etc/nginx
         state: absent
-      loop:
-        - /usr/sbin/nginx
-        - /usr/local/nginx
-        - /etc/nginx
-        - /var/log/nginx
-
-    - name: Vérifier si le binaire existe encore
-      ansible.builtin.command: which nginx
-      register: nginx_check
-      ignore_errors: yes
-
-    - name: Affichage du résultat
-      ansible.builtin.debug:
-        msg: "Nginx est toujours là : {{ nginx_check.stdout }}"
-      when: nginx_check.rc == 0
