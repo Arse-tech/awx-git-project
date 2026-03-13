@@ -1,7 +1,8 @@
 ---
 - hosts: all
   become: yes
-
+  become_method: sudo 
+  become_user: root
   tasks:
 
     - name: Installer nginx
