@@ -1,0 +1,14 @@
+---
+- hosts: all
+  become: yes  # Indispensable pour installer des paquets !
+  tasks:
+    - name: Install Nginx package
+      ansible.builtin.package:  # Détecte seul apt ou yum
+        name: nginx
+        state: present
+
+    - name: Start and enable Nginx service
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: yes
