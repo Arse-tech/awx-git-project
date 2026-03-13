@@ -1,31 +1,26 @@
 ---
 - hosts: all
   become: yes
-  become_method: sudo
-  become_user: root
+
   tasks:
-    - name: Installation de Nginx (force la récupération des configs sur Debian)
-      ansible.builtin.apt:
+
+    - name: Installer nginx
+      ansible.builtin.package:
         name: nginx
         state: present
-        update_cache: yes
-        force_confmiss: yes  # Force la création de /etc/nginx/nginx.conf s'il manque
-      when: ansible_os_family == "Debian"
 
-    - name: Installation de Nginx pour RedHat/CentOS
-      ansible.builtin.yum:
-        name: nginx
-        state: present
-      when: ansible_os_family == "RedHat"
-
-    # Cette étape est cruciale si le dossier a été supprimé
-    - name: Vérifier la validité de la configuration Nginx
+    - name: Vérifier la configuration nginx
       ansible.builtin.command: nginx -t
       register: nginx_check
       ignore_errors: yes
 
-    - name: Redémarrer et activer Nginx
+    - name: Afficher le résultat du test nginx
+      ansible.builtin.debug:
+        var: nginx_check.stdout_lines
+
+    - name: Redémarrer nginx si la config est valide
       ansible.builtin.service:
         name: nginx
-        state: restarted # restarted est plus sûr que started après une réinstallation
+        state: restarted
         enabled: yes
+      when: nginx_check.rc == 0
