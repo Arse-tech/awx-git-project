@@ -1,0 +1,27 @@
+---
+- name: "ORANGE LAB RUN - Test de connectivité"
+  hosts: all
+  gather_facts: no  # On ne récupère pas les infos système tout de suite
+  
+  tasks:
+    - name: "Vérification de la joignabilité (Ping)"
+      ansible.builtin.ping:
+      register: ping_result
+
+    - name: "Affichage des informations de l'équipement"
+      ansible.builtin.debug:
+        msg: 
+          - "Nom : {{ inventory_hostname }}"
+          - "IP : {{ ansible_host }}"
+          - "Constructeur : {{ device_vendor }}"
+          - "Rôle : {{ device_role }}"
+
+    - name: "Vérification spécifique pour EfficientIP"
+      ansible.builtin.shell: "uptime"
+      when: device_vendor == 'EfficientIP'
+      register: uptime_srv
+
+    - name: "Affichage de l'uptime (Serveurs uniquement)"
+      ansible.builtin.debug:
+        var: uptime_srv.stdout
+      when: device_vendor == 'EfficientIP'
