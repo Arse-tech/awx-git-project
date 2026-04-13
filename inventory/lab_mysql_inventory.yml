@@ -1,6 +1,3 @@
 ---
-# Ce fichier indique à Ansible/AWX d'exécuter le script Python
-# pour générer la liste des hôtes dynamiquement.
-
 plugin: script
 path: inventory/mysql_inventory.py
