@@ -3,4 +3,4 @@
 # pour générer la liste des hôtes dynamiquement.
 
 plugin: script
-path: ./mysql_inventory.py
+path: inventory/mysql_inventory.py
