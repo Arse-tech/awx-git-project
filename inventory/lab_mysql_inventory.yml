@@ -1,3 +1,5 @@
 ---
 plugin: script
-path: ./inventory/mysql_inventory.py
+path: inventory/mysql_inventory.py
+compose:
+  ansible_python_interpreter: /usr/bin/python3
