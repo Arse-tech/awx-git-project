@@ -1,27 +1,30 @@
 ---
-# On utilise le plugin officiel au lieu d'un script Python "maison"
+# Utilisation du plugin natif de la collection community.general
 plugin: community.general.mysql_query
 
-# Informations de connexion à ta base MySQL (VM 1)
+# Paramètres de connexion à ta base MySQL (VM 1)
 login_host: 172.16.23.161
 login_user: awx_lecteur
 login_password: PassAWX_789!
 login_db: lab_inventory
 
-# La requête SQL pour extraire tes données
-# On récupère le nom de l'hôte, l'IP, le constructeur et le rôle
+# Requête SQL pour extraire les données de tes équipements
+# On récupère le hostname, l'IP, le constructeur et le rôle
 query: "SELECT hostname, ip_address, vendor, role FROM devices WHERE status = 'Production'"
 
-# --- MAPPING : On transforme les données SQL en données Ansible ---
+# --- MAPPING : Transformation des colonnes SQL en variables Ansible ---
 
-# Le nom de la machine dans Ansible sera la colonne 'hostname'
+# Définit quel champ SQL devient le nom de l'hôte dans AWX
 column_to_host: hostname
 
-# On définit l'adresse IP de connexion (ansible_host)
+# Définit les variables associées à chaque hôte
 compose:
   ansible_host: ip_address
+  device_vendor: vendor
+  device_role: role
 
-# On crée des groupes automatiques basés sur les colonnes 'vendor' et 'role'
+# Crée des groupes automatiques basés sur les valeurs des colonnes SQL
+# Exemple : un groupe 'constructeur_Cisco' ou 'fonction_Server'
 keyed_groups:
   - prefix: constructeur
     key: vendor
