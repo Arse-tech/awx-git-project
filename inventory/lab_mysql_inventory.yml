@@ -1,5 +1,6 @@
 ---
-plugin: script
-# On utilise le chemin absolu utilisé par AWX (/runner/project/)
-# Et on force l'appel à python3 pour bypasser les problèmes de bit +x
-path: python3 /runner/project/inventory/mysql_inventory.py
+# On n'utilise plus "plugin: script" qui bloque la validation
+# On passe par une déclaration qui force l'exécution
+plugin: community.general.script
+path: /usr/bin/python3
+cmd: /runner/project/inventory/mysql_inventory.py
