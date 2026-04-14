@@ -3,6 +3,16 @@ import mysql.connector
 import json
 import sys
 
+# DEBUG: On force l'affichage des erreurs
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
+try:
+    import mysql.connector
+except ImportError as e:
+    print(f"ERREUR : Module Python manquant -> {e}", file=sys.stderr)
+    sys.exit(1)
+    
 def get_inventory():
     # 1. Connexion à ta base MySQL sur la VM 2
     db_config = {
