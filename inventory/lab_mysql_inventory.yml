@@ -1,5 +1,5 @@
 ---
 plugin: script
-# Au lieu de donner juste le chemin, on force l'interpréteur
-# Cela évite qu'Ansible vérifie si le fichier est exécutable ou non
-path: /usr/bin/python3 inventory/mysql_inventory.py
+# On utilise le chemin absolu utilisé par AWX (/runner/project/)
+# Et on force l'appel à python3 pour bypasser les problèmes de bit +x
+path: python3 /runner/project/inventory/mysql_inventory.py
