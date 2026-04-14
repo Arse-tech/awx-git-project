@@ -1,5 +1,5 @@
 ---
 plugin: script
-path: inventory/mysql_inventory.py
-compose:
-  ansible_python_interpreter: /usr/bin/python3
+# Au lieu de donner juste le chemin, on force l'interpréteur
+# Cela évite qu'Ansible vérifie si le fichier est exécutable ou non
+path: /usr/bin/python3 inventory/mysql_inventory.py
