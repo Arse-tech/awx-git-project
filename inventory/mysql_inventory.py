@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-import mysql.connector
-import json
 import sys
-
-# DEBUG: On force l'affichage des erreurs
+import json
 import logging
-logging.basicConfig(level=logging.DEBUG)
 
+# On essaie d'importer le driver MySQL APRES avoir configuré le debug
 try:
     import mysql.connector
 except ImportError as e:
-    print(f"ERREUR : Module Python manquant -> {e}", file=sys.stderr)
-    sys.exit(1)
+    # Ce message apparaîtra enfin dans l'onglet OUTPUT d'AWX
+    print(f"ERREUR CRITIQUE : Le module 'mysql-connector-python' n'est pas installé dans l'Execution Environment AWX.", file=sys.stderr)
+    print(json.dumps({'_meta': {'hostvars': {}}, 'all': {'hosts': []}}))
+    sys.exit(0) # On sort proprement pour qu'AWX lise le JSON vide mais affiche l'erreur en stderr
     
 def get_inventory():
     # 1. Connexion à ta base MySQL sur la VM 2
