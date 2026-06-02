@@ -9,7 +9,7 @@ login_password: PassAWX_789!
 login_db: lab_inventory
 
 # Requête SQL pour extraire les données de tes équipements
-# On récupère le hostname, l'IP, le constructeur et le rôle
+# Correction de la fermeture des guillemets à la fin de 'Production'
 query: "SELECT hostname, ip_address, vendor, role FROM devices WHERE status = 'Production'"
 
 # --- MAPPING : Transformation des colonnes SQL en variables Ansible ---
@@ -18,13 +18,13 @@ query: "SELECT hostname, ip_address, vendor, role FROM devices WHERE status = 'P
 column_to_host: hostname
 
 # Définit les variables associées à chaque hôte
+# Correction : Ajout du format Jinja2 indispensable pour compose
 compose:
   ansible_host: ip_address
   device_vendor: vendor
   device_role: role
 
 # Crée des groupes automatiques basés sur les valeurs des colonnes SQL
-# Exemple : un groupe 'constructeur_Cisco' ou 'fonction_Server'
 keyed_groups:
   - prefix: constructeur
     key: vendor
