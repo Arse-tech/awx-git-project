@@ -1,77 +1,136 @@
 #!/usr/bin/env python3
-import sys
+import argparse
 import json
-import subprocess
-
-# --- ÉTAPE DE DIAGNOSTIC ET AUTO-INSTALL ---
+import logging
+import os
+import sys
 try:
     import mysql.connector
 except ImportError:
-    # On tente d'installer la bibliothèque si elle manque dans le conteneur AWX
+    print(json.dumps({"error": "mysql-connector-python non installe dans l'EE"}))
+    sys.exit(1)
+log_level = os.environ.get("MYSQL_INVENTORY_LOG_LEVEL", "ERROR").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.ERROR),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stderr,
+)
+
+log = logging.getLogger(__name__)
+def env_or_fail(name, default=None, required=False):
+    value = os.environ.get(name, default)
+    if required and not value:
+        raise RuntimeError(f"Variable d'environnement requise absente: {name}")
+    return value
+def get_db_config():
+    return {
+        "host": env_or_fail("MYSQL_HOST", "localhost"),
+        "port": int(env_or_fail("MYSQL_PORT", "3306")),
+        "user": env_or_fail("MYSQL_USER", required=True),
+        "password": env_or_fail("MYSQL_PASSWORD", required=True),
+        "database": env_or_fail("MYSQL_DB", required=True),
+        "connection_timeout": 10,
+    }
+def get_connection():
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "mysql-connector-python"])
-        import mysql.connector
-    except Exception as e:
-        print(f"ERREUR : Impossible d'installer mysql-connector-python : {e}", file=sys.stderr)
+        config = get_db_config()
+        conn = mysql.connector.connect(**config)
+        log.info("Connexion MySQL etablie vers %s/%s", config["host"], config["database"])
+        return conn
+    except Exception as exc:
+        log.error("Connexion MySQL echouee: %s", exc)
+        print(json.dumps({"error": str(exc)}))
         sys.exit(1)
-
-import logging
-# Le reste de ton script (get_inventory, etc.) continue ici...
-    
-def get_inventory():
-    # 1. Connexion à ta base MySQL sur la VM 2
-    db_config = {
-        'host': '172.16.23.161',
-        'user': 'awx_lecteur',
-        'password': 'PassAWX_789!',
-        'database': 'lab_inventory'
-    }
-
-    # Structure de base demandée par Ansible
+def build_inventory():
     inventory = {
-        '_meta': {'hostvars': {}},
-        'all': {'hosts': []}
+        "_meta": {"hostvars": {}},
+        "all": {"hosts": [], "children": []},
     }
-
+    conn = get_connection()
+    cursor = None
     try:
-        conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor(dictionary=True)
-        
-        # 2. On récupère les machines en production
-        cursor.execute("SELECT hostname, ip_address, vendor, role FROM devices WHERE status = 'Production'")
+        cursor.execute(
+            """
+            SELECT hostname, ip_address, vendor, role, status
+            FROM devices
+            WHERE status = 'Production'
+            ORDER BY hostname
+            """
+        )
         devices = cursor.fetchall()
-
         for device in devices:
-            name = device['hostname']
-            vendor = device['vendor'].replace(' ', '_')
-            role = device['role'].replace(' ', '_')
-
-            # 3. On ajoute la machine à la liste globale
-            inventory['all']['hosts'].append(name)
-
-            # 4. On crée des groupes automatiques (ex: un groupe "Cisco", un groupe "Server")
-            for group in [vendor, role]:
-                if group not in inventory:
-                    inventory[group] = {'hosts': []}
-                inventory[group]['hosts'].append(name)
-
-            # 5. On passe les variables à Ansible (IP, Constructeur, etc.)
-            inventory['_meta']['hostvars'][name] = {
-                'ansible_host': device['ip_address'],
-                'device_vendor': device['vendor'],
-                'device_role': device['role']
+            name = device["hostname"]
+            vendor = (device.get("vendor") or "unknown_vendor").strip().replace(" ", "_")
+            role = (device.get("role") or "unknown_role").strip().replace(" ", "_")
+            if name not in inventory["all"]["hosts"]:
+                inventory["all"]["hosts"].append(name)
+            if vendor not in inventory:
+                inventory[vendor] = {"hosts": [], "vars": {}}
+                inventory["all"]["children"].append(vendor)
+            if name not in inventory[vendor]["hosts"]:
+                inventory[vendor]["hosts"].append(name)
+            if role not in inventory:
+                inventory[role] = {"hosts": [], "vars": {}}
+                inventory["all"]["children"].append(role)
+            if name not in inventory[role]["hosts"]:
+                inventory[role]["hosts"].append(name)
+            inventory["_meta"]["hostvars"][name] = {
+                "ansible_host": device["ip_address"],
+                "device_vendor": device.get("vendor"),
+                "device_role": device.get("role"),
+                "device_status": device.get("status"),
             }
-
+        return inventory
+    except Exception as exc:
+        log.error("Erreur SQL ou construction inventaire: %s", exc)
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    finally:
+        if cursor is not None:
+            cursor.close()
         conn.close()
-    except Exception as e:
-        return {"error": str(e)}
-
-    return inventory
-
-# Ansible appelle toujours le script avec l'option --list
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == '--list':
-        print(json.dumps(get_inventory(), indent=2))
+        log.info("Connexion MySQL fermee")
+def get_host_vars(hostname):
+    conn = get_connection()
+    cursor = None
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT hostname, ip_address, vendor, role, status
+            FROM devices
+            WHERE hostname = %s
+              AND status = 'Production'
+            """,
+            (hostname,),
+        )
+        device = cursor.fetchone()
+        if not device:
+            return {}
+        return {
+            "ansible_host": device["ip_address"],
+            "device_vendor": device.get("vendor"),
+            "device_role": device.get("role"),
+            "device_status": device.get("status"),
+        }
+    except Exception as exc:
+        log.error("Erreur SQL: %s", exc)
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(1)
+    finally:
+        if cursor is not None:
+            cursor.close()
+        conn.close()
+def main():
+    parser = argparse.ArgumentParser(description="Inventaire dynamique AWX depuis MySQL")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--list", action="store_true")
+    group.add_argument("--host", metavar="HOSTNAME")
+    args = parser.parse_args()
+    if args.list:
+        print(json.dumps(build_inventory(), indent=2, ensure_ascii=False))
     else:
-        # Si on l'appelle sans argument, on renvoie une structure vide propre
-        print(json.dumps({'_meta': {'hostvars': {}}}, indent=2))
+        print(json.dumps(get_host_vars(args.host), indent=2, ensure_ascii=False))
+if __name__ == "__main__":
+    main()
