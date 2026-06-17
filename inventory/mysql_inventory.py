@@ -66,8 +66,8 @@ def get_connection():
         debug_environment()
 
         config = get_db_config()
-		
-		print(
+
+        print(
             f"CONFIG: host={config['host']} "
             f"port={config['port']} "
             f"db={config['database']} "
