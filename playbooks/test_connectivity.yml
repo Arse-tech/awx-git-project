@@ -1,15 +1,51 @@
 ---
-- name: Aruba Connectivity Test
-  hosts: Aruba
-  gather_facts: no
+- name: Test connectivite AWX
+  hosts: all
+  gather_facts: false
+
+  vars:
+    ping_count: 2
+    ssh_timeout: 3
 
   tasks:
+    - name: Test ping ICMP depuis AWX
+      ansible.builtin.command:
+        cmd: "ping -c {{ ping_count }} {{ ansible_host | default(inventory_hostname) }}"
+      delegate_to: localhost
+      register: icmp_ping
+      ignore_errors: true
+      changed_when: false
 
-    - name: Show version
-      ansible.netcommon.cli_command:
-        command: show version
-      register: version
+    - name: Test ouverture port SSH
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host | default(inventory_hostname) }}"
+        port: "{{ ansible_port | default(22) }}"
+        timeout: "{{ ssh_timeout }}"
+        state: started
+      delegate_to: localhost
+      register: ssh_port_test
+      ignore_errors: true
+      changed_when: false
 
-    - name: Display version
-      debug:
-        var: version.stdout_lines
+    - name: Test Ansible ping
+      ansible.builtin.ping:
+      register: ansible_ping
+      ignore_errors: true
+      changed_when: false
+
+    - name: Test commande distante
+      ansible.builtin.command: hostname
+      register: hostname_result
+      ignore_errors: true
+      changed_when: false
+
+    - name: Resume par hote
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          target: "{{ ansible_host | default(inventory_hostname) }}"
+          icmp: "{{ 'ok' if icmp_ping.rc == 0 else 'ko' }}"
+          ssh_port: "{{ 'ok' if (ssh_port_test is defined and ssh_port_test.failed is not defined) else 'ko' }}"
+          ansible_ping: "{{ 'ok' if (ansible_ping is defined and ansible_ping.ping is defined and ansible_ping.ping == 'pong') else 'ko' }}"
+          remote_command: "{{ 'ok' if (hostname_result.rc is defined and hostname_result.rc == 0) else 'ko' }}"
+          remote_hostname: "{{ hostname_result.stdout | default('n/a') }}"
