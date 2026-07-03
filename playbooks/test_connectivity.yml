@@ -7,6 +7,11 @@
     ansible_network_os: arubaoss
     ansible_command_timeout: 30
   tasks:
+    - name: Debug connection variables
+      ansible.builtin.debug:
+        msg:
+          ansible_connection: "{{ ansible_connection | default('undefined') }}"
+          ansible_network_os: "{{ ansible_network_os | default('undefined') }}"
     - name: Show version
       ansible.netcommon.cli_command:
         command: show version
