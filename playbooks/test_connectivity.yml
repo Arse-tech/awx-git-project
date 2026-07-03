@@ -1,15 +1,16 @@
 ---
-- name: Aruba 2930F Connectivity Test
+- name: Aruba Connectivity Test
   hosts: all
   gather_facts: false
-  connection: network_cli
-
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubaoss
+    ansible_command_timeout: 30
   tasks:
-    - name: Run show version
+    - name: Show version
       ansible.netcommon.cli_command:
         command: show version
       register: show_version
-
-    - name: Display show version
+    - name: Display result
       ansible.builtin.debug:
         var: show_version.stdout_lines
