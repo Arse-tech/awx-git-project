@@ -1,21 +1,52 @@
 ---
-- name: Aruba Connectivity Test
+- name: Aruba 2930F connectivity check from AWX
   hosts: all
   gather_facts: false
   vars:
     ansible_connection: ansible.netcommon.network_cli
-    ansible_network_os: arubaoss
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
     ansible_command_timeout: 30
+    connectivity_ping_count: 2
+    connectivity_timeout: 5
+    connectivity_test_command: "show version"
   tasks:
-    - name: Debug connection variables
+    - name: Display target context
       ansible.builtin.debug:
         msg:
-          ansible_connection: "{{ ansible_connection | default('undefined') }}"
-          ansible_network_os: "{{ ansible_network_os | default('undefined') }}"
-    - name: Show version
+          host: "{{ inventory_hostname }}"
+          ansible_host: "{{ ansible_host | default(inventory_hostname) }}"
+          ansible_connection: "{{ ansible_connection }}"
+          ansible_network_os: "{{ ansible_network_os }}"
+    - name: ICMP ping from AWX execution environment
+      ansible.builtin.command:
+        cmd: "ping -c {{ connectivity_ping_count }} {{ ansible_host | default(inventory_hostname) }}"
+      delegate_to: localhost
+      register: connectivity_icmp
+      ignore_errors: true
+      changed_when: false
+    - name: SSH port check from AWX execution environment
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host | default(inventory_hostname) }}"
+        port: "{{ ansible_port | default(22) }}"
+        timeout: "{{ connectivity_timeout }}"
+        state: started
+      delegate_to: localhost
+      register: connectivity_ssh_port
+      ignore_errors: true
+      changed_when: false
+    - name: CLI command check over SSH
       ansible.netcommon.cli_command:
-        command: show version
-      register: show_version
-    - name: Display result
+        command: "{{ connectivity_test_command }}"
+      register: connectivity_cli
+      ignore_errors: true
+      changed_when: false
+    - name: Connectivity summary
       ansible.builtin.debug:
-        var: show_version.stdout_lines
+        msg:
+          host: "{{ inventory_hostname }}"
+          target: "{{ ansible_host | default(inventory_hostname) }}"
+          icmp: "{{ 'ok' if (connectivity_icmp.rc is defined and connectivity_icmp.rc == 0) else 'ko' }}"
+          ssh_port: "{{ 'ok' if (connectivity_ssh_port is defined and connectivity_ssh_port.failed is defined and not connectivity_ssh_port.failed) else 'ko' }}"
+          cli: "{{ 'ok' if (connectivity_cli is defined and connectivity_cli.failed is defined and not connectivity_cli.failed) else 'ko' }}"
+          command: "{{ connectivity_test_command }}"
+          output_preview: "{{ connectivity_cli.stdout_lines | default([]) }}"
