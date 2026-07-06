@@ -6,6 +6,7 @@
     ansible_connection: ansible.netcommon.network_cli
     ansible_network_os: arubanetworks.aos_switch.arubaoss
     ansible_command_timeout: 30
+    ansible_ssh_common_args: "-o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no -o IdentitiesOnly=yes"
     connectivity_ping_count: 2
     connectivity_timeout: 5
     connectivity_test_command: "show version"
@@ -49,4 +50,5 @@
           ssh_port: "{{ 'ok' if (connectivity_ssh_port is defined and connectivity_ssh_port.failed is defined and not connectivity_ssh_port.failed) else 'ko' }}"
           cli: "{{ 'ok' if (connectivity_cli is defined and connectivity_cli.failed is defined and not connectivity_cli.failed) else 'ko' }}"
           command: "{{ connectivity_test_command }}"
+          error: "{{ connectivity_cli.msg | default('') }}"
           output_preview: "{{ connectivity_cli.stdout_lines | default([]) }}"
