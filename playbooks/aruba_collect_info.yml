@@ -1,1 +1,20 @@
+ tasks:
+    - name: Collecter les informations du switch
+      ansible.netcommon.cli_command:
+        command: "{{ item }}"
+      loop:
+        - show version
+        - show system
+        - show interfaces brief
+        - show vlan
+      register: aruba_output
 
+    - name: Afficher les résultats
+      ansible.builtin.debug:
+        msg: |
+          Commande : {{ item.item }}
+          -------------------------------
+          {{ item.stdout }}
+      loop: "{{ aruba_output.results }}"
+      loop_control:
+        label: "{{ item.item }}"
