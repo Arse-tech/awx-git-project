@@ -1,0 +1,28 @@
+================================================================================
+                     ORANGE LAB RUN - COLLECTE ARUBA AOS-S
+================================================================================
+
+Equipement    : {{ inventory_hostname }}
+Adresse IP    : {{ ansible_host }}
+Constructeur  : {{ device_vendor | default('Aruba') }}
+Role          : {{ device_role | default('Non defini') }}
+
+================================================================================
+                         DEBUT DE LA SESSION CLI
+================================================================================
+
+{% for result in command_results.results %}
+{{ inventory_hostname }}# {{ result.item }}
+
+{{ result.stdout }}
+
+{% if not loop.last %}
+
+{% endif %}
+{% endfor %}
+
+{{ inventory_hostname }}#
+
+================================================================================
+                          FIN DE LA SESSION CLI
+================================================================================
