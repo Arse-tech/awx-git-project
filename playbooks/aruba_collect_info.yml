@@ -1,5 +1,16 @@
- tasks:
-    - name: Collecter les informations du switch
+---
+- name: ORANGE LAB RUN - Collecte informations Aruba AOS-S
+  hosts: CSE-LAB-B01-ARU-SW
+  gather_facts: false
+
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 30
+
+  tasks:
+
+    - name: Collecter les informations du switch Aruba
       ansible.netcommon.cli_command:
         command: "{{ item }}"
       loop:
@@ -7,14 +18,28 @@
         - show system
         - show interfaces brief
         - show vlan
-      register: aruba_output
+      register: aruba_commands
 
-    - name: Afficher les résultats
+    - name: Afficher les informations collectees
       ansible.builtin.debug:
         msg: |
-          Commande : {{ item.item }}
-          -------------------------------
+          ============================================================
+          Equipement : {{ inventory_hostname }}
+          IP          : {{ ansible_host }}
+          Commande    : {{ item.item }}
+          ============================================================
+
           {{ item.stdout }}
-      loop: "{{ aruba_output.results }}"
+      loop: "{{ aruba_commands.results }}"
       loop_control:
         label: "{{ item.item }}"
+
+    - name: Afficher le resume de la collecte
+      ansible.builtin.debug:
+        msg:
+          - "Collecte terminee avec succes"
+          - "Equipement : {{ inventory_hostname }}"
+          - "IP : {{ ansible_host }}"
+          - "Constructeur : {{ device_vendor | default('Aruba') }}"
+          - "Role : {{ device_role | default('Non defini') }}"
+          - "Nombre de commandes executees : {{ aruba_commands.results | length }}"
