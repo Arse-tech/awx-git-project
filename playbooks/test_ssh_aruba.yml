@@ -1,5 +1,4 @@
----
-- name: Test SSH ArubaOS-Switch
+- name: Test connexion SSH ArubaOS-Switch
   hosts: CSE-LAB-B01-ARU-SW
   gather_facts: false
 
@@ -13,6 +12,6 @@
         command: show version
       register: show_version
 
-    - name: Afficher show version
+    - name: Afficher le resultat
       ansible.builtin.debug:
         var: show_version.stdout
