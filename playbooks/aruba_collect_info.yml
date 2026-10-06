@@ -15,6 +15,7 @@
       - show vlan
 
   tasks:
+
     - name: Executer les commandes de collecte
       ansible.netcommon.cli_command:
         command: "{{ item }}"
@@ -26,21 +27,34 @@
         collection_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
         collection_date: "{{ lookup('pipe', 'date \"+%d/%m/%Y %H:%M:%S\"') }}"
 
-    - name: Definir le nom du rapport
+    - name: Definir les noms des rapports
       ansible.builtin.set_fact:
-        report_filename: >-
-          {{ inventory_hostname }}_{{ collection_timestamp }}.txt
+        txt_report: "/tmp/{{ inventory_hostname }}_{{ collection_timestamp }}.txt"
+        pdf_report: "/tmp/{{ inventory_hostname }}_{{ collection_timestamp }}.pdf"
 
-    - name: Generer le rapport CLI
+    - name: Generer le rapport CLI TXT
       ansible.builtin.template:
-        src: ../templates/aruba_cli_report.j2
-        dest: "/tmp/{{ report_filename }}"
+        src: "{{ playbook_dir }}/../templates/aruba_cli_report.j2"
+        dest: "{{ txt_report }}"
         mode: "0644"
       delegate_to: localhost
 
-    - name: Lire le rapport genere
+    - name: Generer le rapport PDF
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../scripts/generate_cli_pdf.py"
+          - "{{ txt_report }}"
+          - "{{ pdf_report }}"
+          - "{{ inventory_hostname }}"
+          - "{{ ansible_host }}"
+      delegate_to: localhost
+      register: pdf_generation
+      changed_when: true
+
+    - name: Lire le rapport TXT
       ansible.builtin.slurp:
-        src: "/tmp/{{ report_filename }}"
+        src: "{{ txt_report }}"
       delegate_to: localhost
       register: generated_report
 
@@ -48,10 +62,11 @@
       ansible.builtin.debug:
         msg: "{{ generated_report.content | b64decode }}"
 
-    - name: Afficher les informations du fichier
+    - name: Resume de la generation
       ansible.builtin.debug:
         msg:
-          - "Collecte terminee avec succes."
+          - "Collecte terminee avec succes"
           - "Equipement : {{ inventory_hostname }}"
           - "IP : {{ ansible_host }}"
-          - "Rapport : {{ report_filename }}"
+          - "Rapport TXT : {{ txt_report }}"
+          - "Rapport PDF : {{ pdf_report }}"
