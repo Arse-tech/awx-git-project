@@ -15,26 +15,43 @@
       - show vlan
 
   tasks:
-
     - name: Executer les commandes de collecte
       ansible.netcommon.cli_command:
         command: "{{ item }}"
       loop: "{{ aruba_commands }}"
-      register: command_results
+      register: aruba_results
+
+    - name: Definir la date de collecte
+      ansible.builtin.set_fact:
+        collection_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+        collection_date: "{{ lookup('pipe', 'date \"+%d/%m/%Y %H:%M:%S\"') }}"
+
+    - name: Definir le nom du rapport
+      ansible.builtin.set_fact:
+        report_filename: >-
+          {{ inventory_hostname }}_{{ collection_timestamp }}.txt
 
     - name: Generer le rapport CLI
       ansible.builtin.template:
         src: ../templates/aruba_cli_report.j2
-        dest: "/tmp/{{ inventory_hostname }}_collecte.txt"
+        dest: "/tmp/{{ report_filename }}"
+        mode: "0644"
       delegate_to: localhost
+
+    - name: Lire le rapport genere
+      ansible.builtin.slurp:
+        src: "/tmp/{{ report_filename }}"
+      delegate_to: localhost
+      register: generated_report
 
     - name: Afficher le rapport dans AWX
-      ansible.builtin.command:
-        cmd: "cat /tmp/{{ inventory_hostname }}_collecte.txt"
-      delegate_to: localhost
-      register: cli_report
-      changed_when: false
-
-    - name: Rapport de collecte
       ansible.builtin.debug:
-        msg: "{{ cli_report.stdout }}"
+        msg: "{{ generated_report.content | b64decode }}"
+
+    - name: Afficher les informations du fichier
+      ansible.builtin.debug:
+        msg:
+          - "Collecte terminee avec succes."
+          - "Equipement : {{ inventory_hostname }}"
+          - "IP : {{ ansible_host }}"
+          - "Rapport : {{ report_filename }}"
