@@ -1,5 +1,5 @@
 ---
-- name: ORANGE LAB RUN - Collecte informations Aruba AOS-S
+- name: ORANGE LAB RUN - Collecte CLI Aruba AOS-S
   hosts: CSE-LAB-B01-ARU-SW
   gather_facts: false
 
@@ -8,38 +8,33 @@
     ansible_network_os: arubanetworks.aos_switch.arubaoss
     ansible_command_timeout: 30
 
+    aruba_commands:
+      - show version
+      - show system
+      - show interfaces brief
+      - show vlan
+
   tasks:
 
-    - name: Collecter les informations du switch Aruba
+    - name: Executer les commandes de collecte
       ansible.netcommon.cli_command:
         command: "{{ item }}"
-      loop:
-        - show version
-        - show system
-        - show interfaces brief
-        - show vlan
-      register: aruba_commands
+      loop: "{{ aruba_commands }}"
+      register: command_results
 
-    - name: Afficher les informations collectees
+    - name: Generer le rapport CLI
+      ansible.builtin.template:
+        src: ../templates/aruba_cli_report.j2
+        dest: "/tmp/{{ inventory_hostname }}_collecte.txt"
+      delegate_to: localhost
+
+    - name: Afficher le rapport dans AWX
+      ansible.builtin.command:
+        cmd: "cat /tmp/{{ inventory_hostname }}_collecte.txt"
+      delegate_to: localhost
+      register: cli_report
+      changed_when: false
+
+    - name: Rapport de collecte
       ansible.builtin.debug:
-        msg: |
-          ============================================================
-          Equipement : {{ inventory_hostname }}
-          IP          : {{ ansible_host }}
-          Commande    : {{ item.item }}
-          ============================================================
-
-          {{ item.stdout }}
-      loop: "{{ aruba_commands.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-
-    - name: Afficher le resume de la collecte
-      ansible.builtin.debug:
-        msg:
-          - "Collecte terminee avec succes"
-          - "Equipement : {{ inventory_hostname }}"
-          - "IP : {{ ansible_host }}"
-          - "Constructeur : {{ device_vendor | default('Aruba') }}"
-          - "Role : {{ device_role | default('Non defini') }}"
-          - "Nombre de commandes executees : {{ aruba_commands.results | length }}"
+        msg: "{{ cli_report.stdout }}"
