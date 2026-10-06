@@ -1,22 +1,30 @@
 ================================================================================
-                     ORANGE LAB RUN - COLLECTE ARUBA AOS-S
+                         ORANGE LAB RUN - IEC
+                   RAPPORT DE COLLECTE ARUBA AOS-S
 ================================================================================
 
-Equipement    : {{ inventory_hostname }}
-Adresse IP    : {{ ansible_host }}
-Constructeur  : {{ device_vendor | default('Aruba') }}
-Role          : {{ device_role | default('Non defini') }}
+INFORMATIONS DE L'EQUIPEMENT
+
+  Equipement      : {{ inventory_hostname }}
+  Adresse IP      : {{ ansible_host }}
+  Constructeur    : {{ device_vendor | default('Aruba') }}
+  Role            : {{ device_role | default('Non defini') }}
+  Systeme         : ArubaOS-Switch
+  Date collecte   : {{ collection_date }}
+  Source          : AWX - Inventaire dynamique MySQL
 
 ================================================================================
                          DEBUT DE LA SESSION CLI
 ================================================================================
 
-{% for result in command_results.results %}
+{% for result in aruba_results.results %}
 {{ inventory_hostname }}# {{ result.item }}
 
 {{ result.stdout }}
 
 {% if not loop.last %}
+
+--------------------------------------------------------------------------------
 
 {% endif %}
 {% endfor %}
@@ -25,4 +33,12 @@ Role          : {{ device_role | default('Non defini') }}
 
 ================================================================================
                           FIN DE LA SESSION CLI
+================================================================================
+
+Statut     : SUCCES
+Equipement : {{ inventory_hostname }}
+Adresse IP : {{ ansible_host }}
+
+Rapport genere automatiquement par AWX
+ORANGE LAB RUN - IEC
 ================================================================================
