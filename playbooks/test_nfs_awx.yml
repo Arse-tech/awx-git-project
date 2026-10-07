@@ -1,1 +1,52 @@
 
+---
+- name: Test NFS depuis le vrai Execution Environment AWX
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Identifier l'utilisateur du conteneur EE
+      ansible.builtin.command: id
+      register: ee_identity
+      changed_when: false
+
+    - name: Afficher l'identite
+      ansible.builtin.debug:
+        var: ee_identity.stdout
+
+    - name: Verifier que awx-storage est monte
+      ansible.builtin.command: df -h /awx-storage
+      register: storage_df
+      changed_when: false
+
+    - name: Afficher le montage
+      ansible.builtin.debug:
+        var: storage_df.stdout_lines
+
+    - name: Verifier les permissions du repertoire reports
+      ansible.builtin.command: ls -ldn /awx-storage/reports
+      register: reports_permissions
+      changed_when: false
+
+    - name: Afficher les permissions
+      ansible.builtin.debug:
+        var: reports_permissions.stdout
+
+    - name: Ecrire sur le stockage NFS
+      ansible.builtin.copy:
+        content: |
+          AWX EXECUTION ENVIRONMENT NFS OK
+          Execution Environment: ee-network-automation:v2
+        dest: /awx-storage/reports/ee-network-automation-test.txt
+        mode: "0664"
+
+    - name: Relire le fichier depuis le EE
+      ansible.builtin.command:
+        cmd: cat /awx-storage/reports/ee-network-automation-test.txt
+      register: test_file
+      changed_when: false
+
+    - name: Afficher le fichier
+      ansible.builtin.debug:
+        var: test_file.stdout_lines
