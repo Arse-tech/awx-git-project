@@ -1,9 +1,13 @@
 ---
-- name: Collecte des informations Aruba et generation des rapports
-  hosts: all
+- name: ORANGE LAB RUN - Collecte CLI Aruba AOS-S
+  hosts: CSE-LAB-B01-ARU-SW
   gather_facts: false
 
   vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 30
+
     reports_root: "/awx-storage/reports/aruba"
 
     aruba_commands:
@@ -15,7 +19,7 @@
   tasks:
 
     # ------------------------------------------------------------------
-    # COLLECTE DES INFORMATIONS DU SWITCH
+    # COLLECTE DES INFORMATIONS DU SWITCH ARUBA
     # ------------------------------------------------------------------
 
     - name: Collecter les informations Aruba
@@ -81,7 +85,7 @@
         pdf_report: "{{ report_directory }}/{{ inventory_hostname }}_{{ collection_timestamp }}.pdf"
 
     # ------------------------------------------------------------------
-    # CREATION DU REPERTOIRE SUR LE NFS
+    # CREATION DU REPERTOIRE SUR LE STOCKAGE NFS
     # ------------------------------------------------------------------
 
     - name: Creer le repertoire de stockage du rapport
@@ -120,7 +124,7 @@
       changed_when: true
 
     # ------------------------------------------------------------------
-    # VERIFICATION DES RAPPORTS
+    # VERIFICATION DU RAPPORT TXT
     # ------------------------------------------------------------------
 
     - name: Verifier le rapport TXT
@@ -129,11 +133,19 @@
       delegate_to: localhost
       register: txt_report_stat
 
+    # ------------------------------------------------------------------
+    # VERIFICATION DU RAPPORT PDF
+    # ------------------------------------------------------------------
+
     - name: Verifier le rapport PDF
       ansible.builtin.stat:
         path: "{{ pdf_report }}"
       delegate_to: localhost
       register: pdf_report_stat
+
+    # ------------------------------------------------------------------
+    # VALIDATION DES RAPPORTS
+    # ------------------------------------------------------------------
 
     - name: Valider la generation des rapports
       ansible.builtin.assert:
@@ -160,17 +172,21 @@
         msg: "{{ txt_report_content.content | b64decode }}"
 
     # ------------------------------------------------------------------
-    # RESUME
+    # RESUME DE LA COLLECTE
     # ------------------------------------------------------------------
 
     - name: Afficher le resume de la collecte
       ansible.builtin.debug:
         msg:
           - "=============================================="
+          - " ORANGE LAB RUN - IEC"
           - " RAPPORT ARUBA GENERE AVEC SUCCES"
           - "=============================================="
           - "Equipement : {{ inventory_hostname }}"
           - "Adresse IP : {{ ansible_host }}"
+          - "Constructeur : {{ device_vendor | default('Aruba') }}"
+          - "Role : {{ device_role | default('Non defini') }}"
+          - "Statut : {{ device_status | default('Non defini') }}"
           - "Stockage NFS : 172.16.23.162:/srv/awx-storage"
           - "Repertoire : {{ report_directory }}"
           - "Rapport TXT : {{ txt_report }}"
