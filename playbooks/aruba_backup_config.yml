@@ -1,0 +1,122 @@
+---
+- name: ORANGE LAB RUN - Sauvegarde configuration Aruba AOS-S
+  hosts: CSE-LAB-B01-ARU-SW
+  gather_facts: false
+
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 30
+
+    backups_root: "/awx-storage/backups/aruba"
+
+  tasks:
+
+    # ------------------------------------------------------------------
+    # COLLECTE DE LA CONFIGURATION
+    # ------------------------------------------------------------------
+
+    - name: Collecter la running-config Aruba
+      ansible.netcommon.cli_command:
+        command: show running-config
+      register: running_config
+
+    # ------------------------------------------------------------------
+    # HORODATAGE
+    # ------------------------------------------------------------------
+
+    - name: Generer l'horodatage
+      ansible.builtin.command: date +%Y%m%d_%H%M%S
+      delegate_to: localhost
+      register: timestamp_cmd
+      changed_when: false
+
+    - name: Generer l'annee
+      ansible.builtin.command: date +%Y
+      delegate_to: localhost
+      register: year_cmd
+      changed_when: false
+
+    - name: Generer le mois
+      ansible.builtin.command: date +%m
+      delegate_to: localhost
+      register: month_cmd
+      changed_when: false
+
+    - name: Generer le jour
+      ansible.builtin.command: date +%d
+      delegate_to: localhost
+      register: day_cmd
+      changed_when: false
+
+    # ------------------------------------------------------------------
+    # DEFINITION DES CHEMINS
+    # ------------------------------------------------------------------
+
+    - name: Definir les chemins de sauvegarde
+      ansible.builtin.set_fact:
+        backup_directory: >-
+          {{ backups_root }}/{{ inventory_hostname }}/{{ year_cmd.stdout }}/{{ month_cmd.stdout }}/{{ day_cmd.stdout }}
+        backup_file: >-
+          {{ backups_root }}/{{ inventory_hostname }}/{{ year_cmd.stdout }}/{{ month_cmd.stdout }}/{{ day_cmd.stdout }}/{{ inventory_hostname }}_{{ timestamp_cmd.stdout }}.cfg
+
+    # ------------------------------------------------------------------
+    # CREATION DU REPERTOIRE NFS
+    # ------------------------------------------------------------------
+
+    - name: Creer le repertoire de sauvegarde
+      ansible.builtin.file:
+        path: "{{ backup_directory }}"
+        state: directory
+        mode: "2775"
+      delegate_to: localhost
+
+    # ------------------------------------------------------------------
+    # SAUVEGARDE DE LA CONFIGURATION
+    # ------------------------------------------------------------------
+
+    - name: Enregistrer la configuration sur le stockage NFS
+      ansible.builtin.copy:
+        content: "{{ running_config.stdout }}\n"
+        dest: "{{ backup_file }}"
+        mode: "0664"
+      delegate_to: localhost
+
+    # ------------------------------------------------------------------
+    # VERIFICATION
+    # ------------------------------------------------------------------
+
+    - name: Verifier le fichier de sauvegarde
+      ansible.builtin.stat:
+        path: "{{ backup_file }}"
+      delegate_to: localhost
+      register: backup_stat
+
+    - name: Valider la sauvegarde
+      ansible.builtin.assert:
+        that:
+          - backup_stat.stat.exists
+          - backup_stat.stat.size | int > 0
+        fail_msg: "Echec de la sauvegarde de la configuration Aruba."
+        success_msg: "La configuration Aruba a ete sauvegardee avec succes."
+
+    # ------------------------------------------------------------------
+    # RESUME
+    # ------------------------------------------------------------------
+
+    - name: Afficher le resume de la sauvegarde
+      ansible.builtin.debug:
+        msg:
+          - "=============================================="
+          - " ORANGE LAB RUN - IEC"
+          - " SAUVEGARDE CONFIGURATION ARUBA"
+          - "=============================================="
+          - "Equipement : {{ inventory_hostname }}"
+          - "Adresse IP : {{ ansible_host }}"
+          - "Constructeur : {{ device_vendor | default('Aruba') }}"
+          - "Role : {{ device_role | default('Non defini') }}"
+          - "Statut : {{ device_status | default('Non defini') }}"
+          - "Fichier : {{ backup_file }}"
+          - "Taille : {{ backup_stat.stat.size }} octets"
+          - "Statut sauvegarde : SUCCES"
+          - "=============================================="
