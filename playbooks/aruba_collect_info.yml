@@ -8,6 +8,9 @@
     ansible_network_os: arubanetworks.aos_switch.arubaoss
     ansible_command_timeout: 30
 
+    # Racine du stockage persistant NFS
+    reports_root: "/awx-storage/reports/aruba"
+
     aruba_commands:
       - show version
       - show system
@@ -16,28 +19,70 @@
 
   tasks:
 
+    # -------------------------------------------------------------------------
+    # 1. COLLECTE DES INFORMATIONS SUR LE SWITCH
+    # -------------------------------------------------------------------------
+
     - name: Executer les commandes de collecte
       ansible.netcommon.cli_command:
         command: "{{ item }}"
       loop: "{{ aruba_commands }}"
       register: aruba_results
 
+    # -------------------------------------------------------------------------
+    # 2. PREPARATION DES INFORMATIONS DU RAPPORT
+    # -------------------------------------------------------------------------
+
     - name: Definir la date de collecte
       ansible.builtin.set_fact:
         collection_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
         collection_date: "{{ lookup('pipe', 'date \"+%d/%m/%Y %H:%M:%S\"') }}"
+        collection_year: "{{ lookup('pipe', 'date +%Y') }}"
+        collection_month: "{{ lookup('pipe', 'date +%m') }}"
+        collection_day: "{{ lookup('pipe', 'date +%d') }}"
+
+    - name: Definir le repertoire du rapport
+      ansible.builtin.set_fact:
+        report_directory: >-
+          {{ reports_root }}/{{ inventory_hostname }}/{{ collection_year }}/{{ collection_month }}/{{ collection_day }}
+
+    # -------------------------------------------------------------------------
+    # 3. CREATION DU REPERTOIRE NFS
+    # -------------------------------------------------------------------------
+
+    - name: Creer le repertoire de stockage du rapport
+      ansible.builtin.file:
+        path: "{{ report_directory }}"
+        state: directory
+        mode: "2775"
+      delegate_to: localhost
+
+    # -------------------------------------------------------------------------
+    # 4. DEFINITION DES FICHIERS
+    # -------------------------------------------------------------------------
 
     - name: Definir les noms des rapports
       ansible.builtin.set_fact:
-        txt_report: "/tmp/{{ inventory_hostname }}_{{ collection_timestamp }}.txt"
-        pdf_report: "/tmp/{{ inventory_hostname }}_{{ collection_timestamp }}.pdf"
+        txt_report: >-
+          {{ report_directory }}/{{ inventory_hostname }}_{{ collection_timestamp }}.txt
+
+        pdf_report: >-
+          {{ report_directory }}/{{ inventory_hostname }}_{{ collection_timestamp }}.pdf
+
+    # -------------------------------------------------------------------------
+    # 5. GENERATION DU RAPPORT TXT
+    # -------------------------------------------------------------------------
 
     - name: Generer le rapport CLI TXT
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../templates/aruba_cli_report.j2"
         dest: "{{ txt_report }}"
-        mode: "0644"
+        mode: "0664"
       delegate_to: localhost
+
+    # -------------------------------------------------------------------------
+    # 6. GENERATION DU RAPPORT PDF
+    # -------------------------------------------------------------------------
 
     - name: Generer le rapport PDF
       ansible.builtin.command:
@@ -52,6 +97,36 @@
       register: pdf_generation
       changed_when: true
 
+    # -------------------------------------------------------------------------
+    # 7. VERIFICATION DES FICHIERS
+    # -------------------------------------------------------------------------
+
+    - name: Verifier le rapport TXT
+      ansible.builtin.stat:
+        path: "{{ txt_report }}"
+      delegate_to: localhost
+      register: txt_report_stat
+
+    - name: Verifier le rapport PDF
+      ansible.builtin.stat:
+        path: "{{ pdf_report }}"
+      delegate_to: localhost
+      register: pdf_report_stat
+
+    - name: Echouer si le rapport TXT ou PDF est absent
+      ansible.builtin.assert:
+        that:
+          - txt_report_stat.stat.exists
+          - txt_report_stat.stat.size > 0
+          - pdf_report_stat.stat.exists
+          - pdf_report_stat.stat.size > 0
+        fail_msg: "La generation des rapports TXT/PDF a echoue."
+        success_msg: "Les rapports TXT et PDF ont ete generes avec succes."
+
+    # -------------------------------------------------------------------------
+    # 8. AFFICHAGE DU RAPPORT TXT DANS AWX
+    # -------------------------------------------------------------------------
+
     - name: Lire le rapport TXT
       ansible.builtin.slurp:
         src: "{{ txt_report }}"
@@ -62,11 +137,19 @@
       ansible.builtin.debug:
         msg: "{{ generated_report.content | b64decode }}"
 
+    # -------------------------------------------------------------------------
+    # 9. RESUME
+    # -------------------------------------------------------------------------
+
     - name: Resume de la generation
       ansible.builtin.debug:
         msg:
           - "Collecte terminee avec succes"
           - "Equipement : {{ inventory_hostname }}"
           - "IP : {{ ansible_host }}"
+          - "Stockage : NFS 172.16.23.162:/srv/awx-storage"
+          - "Repertoire : {{ report_directory }}"
           - "Rapport TXT : {{ txt_report }}"
           - "Rapport PDF : {{ pdf_report }}"
+          - "Taille TXT : {{ txt_report_stat.stat.size }} octets"
+          - "Taille PDF : {{ pdf_report_stat.stat.size }} octets"
