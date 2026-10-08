@@ -174,7 +174,7 @@
       ansible.builtin.command:
         argv:
           - python3
-          - "{{ playbook_dir }}/../scripts/generate_aruba_precheck_pdf.py"
+          - "{{ playbook_dir }}/../scripts/generate_aruba_precheck_pdf_v2.py"
           - --input
           - "{{ archive_dir }}/precheck_results.json"
           - --output
