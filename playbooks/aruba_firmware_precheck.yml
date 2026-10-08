@@ -1,83 +1,37 @@
-
 ---
-# ================================================================
-# ORANGE LAB RUN - IEC
-# PRECHECK FIRMWARE ARUBA AOS-S
-#
-# Fichier : playbooks/aruba_firmware_precheck.yml
-#
-# Survey AWX :
-#   target_device : nom exact du switch dans l'inventaire
-#
-# Commandes :
-#   6 essentielles
-#   10 complementaires
-#
-# Aucune modification de configuration
-# Aucun transfert de firmware
-# Aucun redemarrage
-# ================================================================
-
-
-# ================================================================
-# PLAY 1 - VALIDATION DE L'EQUIPEMENT SELECTIONNE
-# ================================================================
-
 - name: Valider la selection de l'equipement
   hosts: localhost
   gather_facts: false
-
   tasks:
-
     - name: Verifier le parametre target_device
       ansible.builtin.assert:
         that:
           - target_device | default('') | trim | length > 0
           - target_device | default('') is match('^[A-Za-z0-9_.-]+$')
           - target_device | default('') in groups['all']
-        fail_msg: >-
-          Equipement invalide ou absent de l'inventaire AWX.
-          Verifiez la variable target_device du Survey.
-        success_msg: >-
-          Equipement selectionne :
-          {{ target_device | default('') }}
-
+        fail_msg: "Equipement invalide ou absent de l'inventaire AWX."
     - name: Verifier le constructeur Aruba
       ansible.builtin.assert:
         that:
-          - hostvars[target_device].device_vendor
-            | default('')
-            | lower == 'aruba'
-        fail_msg: >-
-          L'equipement selectionne n'est pas identifie
-          comme un equipement Aruba.
-        success_msg: "Constructeur Aruba valide."
-
+          - hostvars[target_device].device_vendor | default('') | lower == 'aruba'
+        fail_msg: "L'equipement selectionne n'est pas Aruba."
     - name: Ajouter l'equipement au groupe temporaire
       ansible.builtin.add_host:
         name: "{{ target_device }}"
         groups: aruba_selected
       changed_when: false
 
-
-# ================================================================
-# PLAY 2 - PRECHECK FIRMWARE DU SWITCH
-# ================================================================
-
-- name: ORANGE LAB RUN - Precheck firmware Aruba AOS-S
+- name: ORANGE LAB RUN - Precheck firmware Aruba AOS-S avec archivage NFS
   hosts: aruba_selected
   gather_facts: false
-
   vars:
-
     ansible_connection: ansible.netcommon.network_cli
     ansible_network_os: arubanetworks.aos_switch.arubaoss
     ansible_command_timeout: 60
-
-    # ============================================================
-    # COMMANDES ESSENTIELLES
-    # ============================================================
-
+    nfs_root: /awx-storage
+    archive_root: /awx-storage/reports/aruba
+    archive_run_id: "{{ tower_job_id | default(awx_job_id | default('manual-' ~ now(utc=true, fmt='%Y%m%dT%H%M%SZ'))) }}"
+    archive_dir: "{{ archive_root }}/{{ inventory_hostname }}/job-{{ archive_run_id }}"
     precheck_required_commands:
       - show version
       - show system
@@ -85,11 +39,6 @@
       - show interfaces brief
       - show vlan
       - show running-config
-
-    # ============================================================
-    # COMMANDES COMPLEMENTAIRES
-    # ============================================================
-
     precheck_optional_commands:
       - show interfaces status
       - show system power-supply
@@ -101,12 +50,23 @@
       - show uptime
       - show loop-protect
       - show boot-history
-
   tasks:
+    - name: Verifier le montage NFS dans le conteneur d'execution
+      ansible.builtin.command:
+        cmd: mountpoint -q /awx-storage
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      changed_when: false
 
-    # ============================================================
-    # 1 - COLLECTE DES COMMANDES ESSENTIELLES
-    # ============================================================
+    - name: Creer le repertoire de rapport NFS
+      ansible.builtin.file:
+        path: "{{ archive_dir }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
 
     - name: Collecter les informations essentielles
       ansible.netcommon.cli_command:
@@ -115,11 +75,8 @@
       loop_control:
         label: "{{ item }}"
       register: required_results
+      failed_when: false
       no_log: true
-
-    # ============================================================
-    # 2 - COLLECTE DES COMMANDES COMPLEMENTAIRES
-    # ============================================================
 
     - name: Collecter les informations complementaires
       ansible.netcommon.cli_command:
@@ -131,73 +88,117 @@
       failed_when: false
       no_log: true
 
-    # ============================================================
-    # 3 - VALIDATION DES COMMANDES ESSENTIELLES
-    # ============================================================
+    - name: Construire les resultats de collecte
+      ansible.builtin.set_fact:
+        all_cli_results: "{{ required_results.results + optional_results.results }}"
+      no_log: true
+
+    - name: Generer la transcription CLI complete
+      ansible.builtin.set_fact:
+        cli_session_text: |-
+          ============================================================
+           ORANGE LAB RUN - IEC
+           SESSION CLI - PRECHECK FIRMWARE ARUBA
+          ============================================================
+          Equipement : {{ inventory_hostname }}
+          Adresse IP : {{ ansible_host | default('Non definie') }}
+          Job AWX   : {{ archive_run_id }}
+          ============================================================
+          {% for result in all_cli_results %}
+
+          {{ inventory_hostname }}# {{ result.item }}
+
+          {% if result.failed | default(false) or result.stdout | default('') | trim | length == 0 %}
+          [COLLECTE NON VALIDEE : commande en echec ou sortie vide]
+          {% else %}
+          {{ result.stdout | default('') }}
+          {% endif %}
+
+          ------------------------------------------------------------
+          {% endfor %}
+          FIN DE SESSION CLI - {{ all_cli_results | length }} commandes
+      no_log: true
+
+    - name: Enregistrer la session CLI unique sur NFS
+      ansible.builtin.copy:
+        content: "{{ cli_session_text }}\n"
+        dest: "{{ archive_dir }}/precheck_cli_session.txt"
+        mode: '0600'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      no_log: true
+
+    - name: Enregistrer les resultats JSON sur NFS
+      ansible.builtin.copy:
+        content: "{{ {'hostname': inventory_hostname, 'ip': ansible_host | default(''), 'awx_job': archive_run_id, 'required_commands': precheck_required_commands, 'optional_commands': precheck_optional_commands, 'results': all_cli_results | map(attribute='stdout') | list} | to_nice_json }}\n"
+        dest: "{{ archive_dir }}/precheck_results.json"
+        mode: '0600'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      no_log: true
+
+    - name: Evaluer les commandes essentielles
+      ansible.builtin.set_fact:
+        required_invalid: >-
+          {{ required_results.results | selectattr('failed', 'defined') | selectattr('failed') | list | length > 0
+             or required_results.results | selectattr('stdout', 'undefined') | list | length > 0
+             or required_results.results | selectattr('stdout', 'equalto', '') | list | length > 0
+             or required_results.results | map(attribute='stdout') | select('search', 'Invalid input|Invalid command|Unknown command') | list | length > 0 }}
+      no_log: true
+
+    - name: Enregistrer le rapport de synthese TXT
+      ansible.builtin.copy:
+        content: |-
+          ORANGE LAB RUN - IEC
+          PRECHECK FIRMWARE ARUBA
+          Equipement : {{ inventory_hostname }}
+          Adresse IP : {{ ansible_host | default('Non definie') }}
+          Constructeur : {{ device_vendor | default('Aruba') }}
+          Role : {{ device_role | default('Non defini') }}
+          Statut inventaire : {{ device_status | default('Non defini') }}
+          Job AWX : {{ archive_run_id }}
+          Commandes essentielles : {{ precheck_required_commands | length }}
+          Commandes complementaires : {{ precheck_optional_commands | length }}
+          Validation essentielles : {{ 'ECHEC' if required_invalid | bool else 'OK' }}
+          Controle automatique VSF : non effectue
+          Aucune modification effectuee sur le switch
+        dest: "{{ archive_dir }}/precheck_report.txt"
+        mode: '0600'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
 
     - name: Valider les commandes essentielles
       ansible.builtin.assert:
         that:
-          - item.stdout | default('') | trim | length > 0
-          - not (item.failed | default(false))
-          - "'Invalid input' not in (item.stdout | default(''))"
-          - "'Invalid command' not in (item.stdout | default(''))"
-          - "'Unknown command' not in (item.stdout | default(''))"
-        fail_msg: "ECHEC : {{ item.item }}"
-        success_msg: "OK : {{ item.item }}"
-      loop: "{{ required_results.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-      no_log: true
-
-    - name: Confirmer la validation des commandes essentielles
-      ansible.builtin.debug:
-        msg: >-
-          Les {{ precheck_required_commands | length }}
-          commandes essentielles ont ete validees.
-
-    # ============================================================
-    # 4 - STATUT DES COMMANDES COMPLEMENTAIRES
-    # ============================================================
+          - not (required_invalid | bool)
+        fail_msg: "Une ou plusieurs commandes essentielles sont invalides. Voir les fichiers archives sur NFS."
+        success_msg: "Les 6 commandes essentielles ont ete validees."
 
     - name: Afficher le statut des commandes complementaires
       ansible.builtin.debug:
         msg: >-
-          {{ item.item }} :
-          {{
-            'NON VALIDEE'
-            if (
-              item.failed | default(false)
-              or item.stdout | default('') | trim | length == 0
-              or 'Invalid input' in (item.stdout | default(''))
-              or 'Invalid command' in (item.stdout | default(''))
-              or 'Unknown command' in (item.stdout | default(''))
-            )
-            else 'COLLECTEE'
-          }}
+          {{ item.item }} : {{ 'NON VALIDEE' if
+          (item.failed | default(false) or
+          item.stdout | default('') | trim | length == 0 or
+          'Invalid input' in (item.stdout | default('')) or
+          'Invalid command' in (item.stdout | default('')) or
+          'Unknown command' in (item.stdout | default('')))
+          else 'COLLECTEE' }}
       loop: "{{ optional_results.results }}"
       loop_control:
         label: "{{ item.item }}"
 
-    # ============================================================
-    # 5 - RESUME FINAL DU PRECHECK
-    # ============================================================
-
     - name: Afficher le resume du precheck
       ansible.builtin.debug:
         msg:
-          - "================================================"
-          - " ORANGE LAB RUN - IEC"
-          - " PRECHECK FIRMWARE ARUBA"
-          - "================================================"
           - "Equipement : {{ inventory_hostname }}"
-          - "Adresse IP : {{ ansible_host | default('Non definie') }}"
-          - "Constructeur : {{ device_vendor | default('Aruba') }}"
-          - "Role : {{ device_role | default('Non defini') }}"
-          - "Statut inventaire : {{ device_status | default('Non defini') }}"
           - "Commandes essentielles : {{ precheck_required_commands | length }}"
           - "Commandes complementaires : {{ precheck_optional_commands | length }}"
-          - "Precheck de collecte termine"
+          - "Session CLI : {{ archive_dir }}/precheck_cli_session.txt"
+          - "Rapport TXT : {{ archive_dir }}/precheck_report.txt"
+          - "Resultats JSON : {{ archive_dir }}/precheck_results.json"
           - "Controle automatique VSF : non effectue"
           - "Aucune modification effectuee sur le switch"
-          - "================================================"
