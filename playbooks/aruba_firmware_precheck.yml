@@ -170,6 +170,28 @@
       vars:
         ansible_connection: local
 
+    - name: Generer le rapport PDF sur NFS
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../scripts/generate_aruba_precheck_pdf.py"
+          - --input
+          - "{{ archive_dir }}/precheck_results.json"
+          - --output
+          - "{{ archive_dir }}/precheck_report.pdf"
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      changed_when: true
+
+    - name: Proteger le rapport PDF
+      ansible.builtin.file:
+        path: "{{ archive_dir }}/precheck_report.pdf"
+        mode: '0600'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+
     - name: Valider les commandes essentielles
       ansible.builtin.assert:
         that:
@@ -199,6 +221,7 @@
           - "Commandes complementaires : {{ precheck_optional_commands | length }}"
           - "Session CLI : {{ archive_dir }}/precheck_cli_session.txt"
           - "Rapport TXT : {{ archive_dir }}/precheck_report.txt"
+          - "Rapport PDF : {{ archive_dir }}/precheck_report.pdf"
           - "Resultats JSON : {{ archive_dir }}/precheck_results.json"
           - "Controle automatique VSF : non effectue"
           - "Aucune modification effectuee sur le switch"
