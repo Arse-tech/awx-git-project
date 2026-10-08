@@ -1,0 +1,46 @@
+---
+- name: Valider la cible
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Controle Survey et inventaire
+      ansible.builtin.assert:
+        that:
+          - target_device | default('') is match('^[A-Za-z0-9_.-]+$')
+          - target_device in groups['all']
+          - hostvars[target_device].device_vendor | default('') | lower == 'aruba'
+    - name: Construire le groupe cible
+      ansible.builtin.add_host:
+        name: "{{ target_device }}"
+        groups: aruba_workflow_target
+      changed_when: false
+
+- name: Validation technique Secondary
+  hosts: aruba_workflow_target
+  gather_facts: false
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 120
+    firmware_target: WC.16.11.0030
+    archive_root: /awx-storage/reports/aruba
+    workflow_id: "{ awx_workflow_job_id | default('manual') }"
+    run_dir: "{ archive_root }/{ inventory_hostname }/upgrade-{ workflow_id }"
+  tasks:
+    - name: Lire la version active
+      ansible.netcommon.cli_command:
+        command: show version
+      register: ver
+    - name: Lire les partitions
+      ansible.netcommon.cli_command:
+        command: show flash
+      register: flash
+    - name: Verifier version cible presente dans les sorties
+      ansible.builtin.assert:
+        that:
+          - "'WC.16.11.0030' in (ver.stdout | default(''))"
+          - "'WC.16.11.0030' in (flash.stdout | default(''))"
+        fail_msg: "Version cible non confirmee : bloquer Primary."
+    - name: Afficher le controle minimal
+      ansible.builtin.debug:
+        msg: "Version cible visible ; verifier manuellement l'image active et les services avant approbation Primary."

@@ -1,0 +1,128 @@
+---
+- name: Valider la cible
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Controle Survey et inventaire
+      ansible.builtin.assert:
+        that:
+          - target_device | default('') is match('^[A-Za-z0-9_.-]+$')
+          - target_device in groups['all']
+          - hostvars[target_device].device_vendor | default('') | lower == 'aruba'
+    - name: Construire le groupe cible
+      ansible.builtin.add_host:
+        name: "{{ target_device }}"
+        groups: aruba_workflow_target
+      changed_when: false
+
+- name: Postcheck final complet
+  hosts: aruba_workflow_target
+  gather_facts: false
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 120
+    firmware_target: WC.16.11.0030
+    archive_root: /awx-storage/reports/aruba
+    workflow_id: "{ awx_workflow_job_id | default('manual') }"
+    run_dir: "{ archive_root }/{ inventory_hostname }/upgrade-{ workflow_id }"
+  tasks:
+    - name: Definir les commandes
+      ansible.builtin.set_fact:
+        required_commands: [show version, show system, show flash, show interfaces brief, show vlan, show running-config]
+        optional_commands: [show interfaces status, show system power-supply, show system fans, show cpu, show
+    vsf topology, show time, show spanning-tree, show uptime, show loop-protect, show
+    boot-history]
+    - name: Collecter les commandes essentielles
+      ansible.netcommon.cli_command:
+        command: "{{ item }}"
+      loop: "{{ required_commands }}"
+      register: essential
+      failed_when: false
+      no_log: true
+    - name: Collecter les commandes complementaires
+      ansible.netcommon.cli_command:
+        command: "{{ item }}"
+      loop: "{{ optional_commands }}"
+      register: extra
+      failed_when: false
+      no_log: true
+    - name: Construire la session
+      ansible.builtin.set_fact:
+        all_results: "{{ essential.results + extra.results }}"
+      no_log: true
+    - name: Creer repertoire de postcheck
+      ansible.builtin.file:
+        path: "{{ run_dir }}/postcheck"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+    - name: Archiver les sorties JSON
+      ansible.builtin.copy:
+        content: "{{ {'hostname': inventory_hostname, 'ip': ansible_host | default(''), 'awx_job': awx_job_id | default('manual'), 'required_commands': required_commands, 'optional_commands': optional_commands, 'results': all_results | map(attribute='stdout') | list} | to_nice_json }}
+"
+        dest: "{{ run_dir }}/postcheck/postcheck_results.json"
+        mode: '0600'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      no_log: true
+    - name: Archiver la transcription complete
+      ansible.builtin.copy:
+        content: |-
+          POSTCHECK COMPLET - {{ inventory_hostname }}
+          {% for r in all_results %}
+          {{ inventory_hostname }}# {{ r.item }}
+          {{ r.stdout | default('[SORTIE ABSENTE]') }}
+          ------------------------------------------------------------
+          {% endfor %}
+        dest: "{{ run_dir }}/postcheck/postcheck_cli_session.txt"
+        mode: '0600'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      no_log: true
+    - name: Generer le PDF avec le generateur V2.1 deja valide
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../scripts/generate_aruba_precheck_pdf_v2.py"
+          - --input
+          - "{{ run_dir }}/postcheck/postcheck_results.json"
+          - --output
+          - "{{ run_dir }}/postcheck/postcheck_report.pdf"
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      changed_when: true
+    - name: Proteger le PDF
+      ansible.builtin.file:
+        path: "{{ run_dir }}/postcheck/postcheck_report.pdf"
+        mode: '0600'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+    - name: Evaluer la collecte et les versions
+      ansible.builtin.assert:
+        that:
+          - "(essential.results | selectattr('failed', 'equalto', true) | list | length) == 0"
+          - "(essential.results | selectattr('stdout', 'equalto', '') | list | length) == 0"
+          - "'WC.16.11.0030' in (essential.results[0].stdout | default(''))"
+          - "(essential.results[2].stdout | regex_findall('WC[.]16[.]11[.]0030') | length) >= 2"
+        fail_msg: "Postcheck NON CONFORME : sorties ou versions a verifier."
+    - name: Archiver la synthese
+      ansible.builtin.copy:
+        content: |-
+          POSTCHECK - {{ inventory_hostname }}
+          Firmware cible WC.16.11.0030 detecte dans show version.
+          Deux occurrences du firmware cible detectees dans show flash (controle textuel, verification humaine requise).
+          Comparaison interfaces/VLAN avec precheck : A VALIDER MANUELLEMENT.
+          Etat VSF : informatif (Commander attendu).
+          Autorisation de cloture : A VALIDER.
+        dest: "{{ run_dir }}/postcheck/postcheck_report.txt"
+        mode: '0600'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local

@@ -1,0 +1,86 @@
+---
+- name: Valider la cible
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Controle Survey et inventaire
+      ansible.builtin.assert:
+        that:
+          - target_device | default('') is match('^[A-Za-z0-9_.-]+$')
+          - target_device in groups['all']
+          - hostvars[target_device].device_vendor | default('') | lower == 'aruba'
+    - name: Construire le groupe cible
+      ansible.builtin.add_host:
+        name: "{{ target_device }}"
+        groups: aruba_workflow_target
+      changed_when: false
+
+- name: Upgrade SECONDARY
+  hosts: aruba_workflow_target
+  gather_facts: false
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 120
+    firmware_target: WC.16.11.0030
+    archive_root: /awx-storage/reports/aruba
+    workflow_id: "{ awx_workflow_job_id | default('manual') }"
+    run_dir: "{ archive_root }/{ inventory_hostname }/upgrade-{ workflow_id }"
+  tasks:
+    - name: Refuser toute execution sans validation des pre-requis
+      ansible.builtin.assert:
+        that:
+          - firmware_compatibility_approved | default(false) | bool
+          - rollback_procedure_approved | default(false) | bool
+          - maintenance_window_approved | default(false) | bool
+          - upgrade_execution_enabled | default(false) | bool
+          - upgrade_cli_command | default('') | length > 0
+        fail_msg: "BLOQUE : pre-requis ou commande constructeur non valides. Aucune action sur le switch."
+    - name: Verifier le fichier firmware local avant action
+      ansible.builtin.stat:
+        path: /awx-storage/firmwares/aruba/2930F/WC_16_11_0030.swi
+        checksum_algorithm: sha256
+      register: image_file
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+    - name: Controler SHA256 et presence
+      ansible.builtin.assert:
+        that:
+          - image_file.stat.isreg | default(false)
+          - image_file.stat.checksum | default('') == '4749334ebdb4989c6176643b2daf57514441348778899895dc08d1c1d546e42d'
+    - name: Controle avant installation
+      ansible.netcommon.cli_command:
+        command: show flash
+      register: before_flash
+    - name: Exiger que la commande cible explicitement SECONDARY
+      ansible.builtin.assert:
+        that:
+          - "'secondary' in (upgrade_cli_command | lower)"
+        fail_msg: "Commande ne mentionne pas la partition secondary."
+    - name: Executer UNIQUEMENT la commande d'installation prealablement homologuee
+      ansible.netcommon.cli_command:
+        command: "{{ upgrade_cli_command }}"
+      register: upgrade_output
+      no_log: true
+    - name: Controle apres installation
+      ansible.netcommon.cli_command:
+        command: show flash
+      register: after_flash
+    - name: Creer le repertoire d'archivage
+      ansible.builtin.file:
+        path: "{{ run_dir }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+    - name: Archiver le resultat de l'etape
+      ansible.builtin.copy:
+        content: "{{ {'phase': 'SECONDARY', 'before': before_flash.stdout, 'after': after_flash.stdout, 'job': awx_job_id | default('manual')} | to_nice_json }}\n"
+        dest: "{{ run_dir }}/upgrade_secondary.json"
+        mode: '0600'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      no_log: true
