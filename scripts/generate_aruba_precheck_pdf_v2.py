@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Aruba AOS-S AWX precheck V2. Read-only: consumes the existing JSON schema."""
+"""Aruba AOS-S precheck PDF V2.1. Usage: --input JSON --output PDF.
+Requires reportlab. No device commands are executed.
+"""
 import argparse
 import json
 import re
@@ -7,176 +9,117 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether, Preformatted
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether, Flowable
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
-NAVY = colors.HexColor('#17324D')
-ORANGE = colors.HexColor('#E87524')
-PALE = colors.HexColor('#F0F4F8')
-GREY = colors.HexColor('#526272')
-LINE = colors.HexColor('#DCE3EA')
+REQUIRED = ['show version','show system','show flash','show interfaces brief','show vlan','show running-config']
+OPTIONAL = ['show interfaces status','show system power-supply','show system fans','show cpu','show vsf topology','show time','show spanning-tree','show uptime','show loop-protect','show boot-history']
+NAVY = colors.HexColor('#19344c')
+PALE = colors.HexColor('#edf2f6')
 
+class CLILine(Flowable):
+    def __init__(self, line, font_size=6.4, leading=9):
+        super().__init__()
+        self.line = line
+        self.font_size = font_size
+        self.leading = leading
+        self.height = leading
+    def wrap(self, availWidth, availHeight):
+        self.width = availWidth
+        return (availWidth, self.height)
+    def draw(self):
+        self.canv.setFont('Courier', self.font_size)
+        self.canv.setFillColor(colors.HexColor('#253442'))
+        self.canv.drawString(0, 1, self.line)
 
-def clean(text, command):
-    """Clean command echo in PDF only; never alter the archived original."""
-    value = (text or '').replace('\r', '')
-    return re.sub(r'^\s*' + re.escape(command) + r'(?=\S)', '', value, count=1, flags=re.I).lstrip('\n')
+def remove_echo(raw, command):
+    """Remove only the echoed command prefix on a line, preserving the rest of that line."""
+    text = str(raw or '').replace('\r\n','\n').replace('\r','\n').replace('\x08','')
+    lines = text.split('\n')
+    # AOS-S may echo the command before the actual first output line.
+    # Strip once only, at the beginning of the output (ignoring empty lines).
+    for idx, line in enumerate(lines):
+        if not line.strip():
+            continue
+        match = re.match(r'^\s*(?:[^\s#>]+[>#]\s*)?' + re.escape(command) + r'(?=\s|$)', line, re.I)
+        if match:
+            lines[idx] = line[match.end():].lstrip()
+        break
+    return '\n'.join(lines)
 
-
-def match(text, pattern):
-    found = re.search(pattern, text, flags=re.I | re.M)
-    return found.group(1).strip() if found else 'Non déterminé'
-
-
-def make_report(src, dst):
-    data = json.loads(Path(src).read_text(encoding='utf-8'))
-    required = data.get('required_commands', [])
-    optional = data.get('optional_commands', [])
-    commands = required + optional
-    outputs = data.get('results', [])
-    if len(commands) != len(outputs):
-        raise ValueError('Nombre de commandes et de sorties incohérent')
-    by_command = dict(zip(commands, [str(v or '') for v in outputs]))
-    version = by_command.get('show version', '')
-    flash = by_command.get('show flash', '')
-    system = by_command.get('show system', '')
-    fans = by_command.get('show system fans', '')
-    cpu = by_command.get('show cpu', '')
-    vsf = by_command.get('show vsf topology', '')
-    power = by_command.get('show system power-supply', '')
-    spanning = by_command.get('show spanning-tree', '')
-    boot = match(version, r'^Boot Image:\s*(\S+)')
-    primary = match(flash, r'^Primary Image\s*:\s*\d+\s+\S+\s+(\S+)')
-    secondary = match(flash, r'^Secondary Image\s*:\s*\d+\s+\S+\s+(\S+)')
-    active = primary if boot.lower() == 'primary' else secondary if boot.lower() == 'secondary' else match(system, r'^\s*Software revision\s*:\s*(\S+)')
-    rom = match(version, r'^Boot ROM Version:\s*(\S+)')
-    statuses = []
-    for command, raw in zip(commands, outputs):
-        value = str(raw or '')
-        valid = bool(value.strip()) and not re.search(r'Invalid input|Invalid command|Unknown command', value, re.I)
-        statuses.append((command, 'COLLECTÉE' if valid else 'À VÉRIFIER'))
-    essential_ok = all(status == 'COLLECTÉE' for _, status in statuses[:len(required)])
-
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name='BrandV2', fontName='Helvetica-Bold', fontSize=17, leading=21, textColor=NAVY, spaceAfter=7))
-    styles.add(ParagraphStyle(name='SubV2', fontName='Helvetica', fontSize=10, leading=15, textColor=GREY, spaceAfter=12))
-    styles.add(ParagraphStyle(name='SectionV2', fontName='Helvetica-Bold', fontSize=12, leading=16, textColor=NAVY, spaceBefore=9, spaceAfter=8))
-    styles.add(ParagraphStyle(name='BodyV2', fontName='Helvetica', fontSize=9, leading=13, spaceAfter=7))
-    styles.add(ParagraphStyle(name='TinyV2', fontName='Helvetica', fontSize=8, leading=11))
-    styles.add(ParagraphStyle(name='HeadCellV2', fontName='Helvetica-Bold', fontSize=8, leading=11, textColor=colors.white))
-    doc = SimpleDocTemplate(str(dst), pagesize=A4, rightMargin=18*mm, leftMargin=18*mm, topMargin=19*mm, bottomMargin=19*mm)
-    story = []
-
-    def p(value, style='TinyV2'):
-        return Paragraph(escape(str(value)), styles[style])
-
-    def heading(title):
-        story.append(Paragraph(escape(title), styles['SectionV2']))
-
-    def table(rows, widths=None, header=False):
-        converted = [[p(cell, 'HeadCellV2' if header and idx == 0 else 'TinyV2') for cell in row] for idx, row in enumerate(rows)]
-        t = Table(converted, colWidths=widths, repeatRows=1 if header else 0, hAlign='LEFT')
-        commands_style = [('VALIGN', (0,0), (-1,-1), 'TOP'), ('LEFTPADDING',(0,0),(-1,-1),8), ('RIGHTPADDING',(0,0),(-1,-1),8), ('TOPPADDING',(0,0),(-1,-1),6), ('BOTTOMPADDING',(0,0),(-1,-1),6), ('LINEBELOW',(0,0),(-1,-1),0.35,LINE)]
-        if header:
-            commands_style.append(('BACKGROUND',(0,0),(-1,0),NAVY))
-            commands_style.append(('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,PALE]))
+def wrapped_lines(text, max_width, font_size):
+    """Soft-wrap long CLI lines without deleting characters or splitting columns unnecessarily."""
+    max_chars = max(20, int(max_width / stringWidth('M','Courier',font_size)))
+    for line in text.split('\n'):
+        line = line.expandtabs(4)
+        if not line:
+            yield ' '
         else:
-            commands_style.append(('BACKGROUND',(0,0),(0,-1),PALE))
-        t.setStyle(TableStyle(commands_style))
-        story.append(t)
+            while len(line) > max_chars:
+                yield line[:max_chars]
+                line = '    ' + line[max_chars:]
+            yield line
 
-    story += [Paragraph('ORANGE LAB RUN - IEC', styles['BrandV2']), Paragraph('Précheck firmware Aruba AOS-S | Rapport technique V2', styles['SubV2'])]
-    heading('01 — Synthèse exécutive')
-    table([
-        ['Équipement', data.get('hostname','Non déterminé')],
-        ['Adresse IP', data.get('ip','Non déterminé')],
-        ['Job AWX', data.get('awx_job','Non déterminé')],
-        ['Collecte', f'{sum(s == "COLLECTÉE" for _,s in statuses)}/{len(statuses)} commandes collectées'],
-        ['Commandes essentielles', f'{len(required)} — {"collecte validée" if essential_ok else "à vérifier"}'],
-        ['Contrôle VSF', 'Non effectué automatiquement'],
-    ], [56*mm, 118*mm])
-    heading('Images firmware et démarrage')
-    table([['Paramètre', 'Valeur'], ['Image de démarrage', boot], ['Version active déduite', active], ['Image primaire', primary], ['Image secondaire', secondary], ['Boot ROM', rom]], [72*mm, 102*mm], True)
-    story.append(Spacer(1, 12))
-    story.append(Paragraph('Résultat : collecte des informations uniquement. Ce rapport ne valide ni la santé VSF, ni la compatibilité d’un firmware cible, ni l’autorisation de mise à jour.', styles['BodyV2']))
+def page_footer(canvas, doc):
+    canvas.saveState()
+    w, _ = landscape(A4)
+    canvas.setStrokeColor(colors.HexColor('#cbd5df'))
+    canvas.line(16*mm, 12*mm, w-16*mm, 12*mm)
+    canvas.setFont('Helvetica', 8)
+    canvas.setFillColor(NAVY)
+    canvas.drawString(16*mm, 8*mm, 'ORANGE LAB RUN - IEC | AWX | Précheck Aruba V2.1')
+    canvas.drawRightString(w-16*mm, 8*mm, f'Page {doc.page}')
+    canvas.restoreState()
 
-    story.append(PageBreak())
-    heading('02 — État technique observé')
-    fan_states = re.findall(r'^\s*Sys-\d+\s*\|\s*([^|\n]+)', fans, re.M)
-    fan_value = ', '.join(x.strip() for x in fan_states) if fan_states else 'Non déterminé'
-    cpu_value = match(cpu, r'^\s*1 min ave:\s*(.+)$')
-    if cpu_value == 'Non déterminé':
-        cpu_value = match(system, r'^\s*CPU Util \(%\)\s*:\s*(.+)$')
-    power_value = 'Sortie collectée (consulter la transcription)' if power.strip() else 'Non déterminé'
-    vsf_value = 'Topologie collectée (validation non effectuée)' if vsf.strip() else 'Non déterminé'
-    stp_value = match(spanning, r'^\s*STP Enabled\s*:\s*(.+)$')
-    table([['Élément', 'Observation'], ['Version logicielle', match(system, r'^\s*Software revision\s*:\s*(.+)$')], ['Uptime', match(system, r'^\s*Up Time\s*:\s*(.+)$')], ['CPU', cpu_value], ['Ventilateurs', fan_value], ['Alimentation', power_value], ['VSF', vsf_value], ['Spanning Tree activé', stp_value]], [58*mm,116*mm], True)
-    heading('Autres domaines collectés')
-    for label, cmd in [('Interfaces', 'show interfaces brief'), ('VLAN', 'show vlan'), ('Protection des boucles', 'show loop-protect'), ('Historique de démarrage', 'show boot-history')]:
-        state = next((s for c,s in statuses if c == cmd), 'NON DEMANDÉE')
-        story.append(Paragraph(f'<b>{escape(label)} :</b> {escape(state)} — détails disponibles dans la session CLI complète.', styles['BodyV2']))
-    story.append(Paragraph('Les états présentés sont des observations issues des commandes. Aucune validation de conformité matérielle ou réseau n’est réalisée automatiquement.', styles['BodyV2']))
-
-    story.append(PageBreak())
-    heading('03 — Matrice de collecte des commandes')
-    matrix = [['N°', 'Commande', 'Catégorie', 'Statut']]
-    for i, (command, state) in enumerate(statuses, 1):
-        matrix.append([f'{i:02}', command, 'Essentielle' if i <= len(required) else 'Complémentaire', state])
-    table(matrix, [13*mm, 78*mm, 43*mm, 40*mm], True)
-    story.append(Spacer(1, 12))
-    story.append(Paragraph('Statut « COLLECTÉE » : une sortie non vide a été obtenue sans message d’erreur CLI reconnu. Ce statut ne constitue pas une validation de conformité.', styles['BodyV2']))
-
-    story.append(PageBreak())
-    heading('04 — Transcription CLI intégrale')
-    story.append(Paragraph('Les sorties ci-dessous proviennent du JSON AWX, sans troncature. Les retours de ligne sont conservés. Le TXT NFS demeure la preuve originale.', styles['BodyV2']))
-    cli_style = ParagraphStyle(name='CliFullV2', fontName='Courier', fontSize=6.4, leading=8.5, textColor=NAVY, spaceAfter=3)
-    for i, (command, raw) in enumerate(zip(commands, outputs), 1):
-        if i > 1:
-            story.append(Spacer(1, 10))
-        story.append(Paragraph(f'{i:02d}. {escape(command)}', styles['SectionV2']))
-        content = str(raw if raw is not None else '') .replace('\r\n', '\n').replace('\r', '\n')
-        # Le nettoyage est uniquement cosmétique dans le PDF, pas dans le TXT.
-        content = clean(content, command)
-        if not content.strip():
-            content = '[Aucune sortie CLI]'
-        # Preformatted conserve espaces et lignes ; le fractionnement évite
-        # les blocs plus hauts qu'une page A4.
-        for line in content.split('\n'):
-            # Fractionnement des lignes très longues pour ne pas dépasser la page.
-            while len(line) > 98:
-                story.append(Preformatted(line[:98], cli_style, maxLineLength=98))
-                line = line[98:]
-            story.append(Preformatted(line if line else ' ', cli_style, maxLineLength=98))
-
-    story.append(PageBreak())
-    heading('05 — Conclusion et points de vigilance')
-    table([['Contrôle', 'Conclusion'], ['Collecte des commandes essentielles', 'Réussie' if essential_ok else 'À vérifier'], ['Collecte complémentaire', f'{sum(s == "COLLECTÉE" for _,s in statuses[len(required):])}/{len(optional)} collectées'], ['Contrôle automatique VSF', 'Non effectué'], ['Firmware cible et compatibilité', 'Non évalués'], ['Autorisation de mise à jour', 'Non délivrée']], [78*mm, 96*mm], True)
-    heading('Points à vérifier avant une intervention')
-    for item in ['Évaluer manuellement la topologie et la santé VSF.', 'Confirmer le firmware cible, la compatibilité matérielle et les notes de version.', 'Préparer une sauvegarde de configuration et un plan de retour arrière.', 'Planifier une fenêtre de maintenance et les validations après redémarrage.']:
-        story.append(Paragraph('• ' + escape(item), styles['BodyV2']))
-    heading('Traçabilité NFS')
-    story.append(Paragraph('Répertoire du Job : reports/aruba/' + escape(str(data.get('hostname',''))) + '/job-' + escape(str(data.get('awx_job',''))) + '/', styles['BodyV2']))
-    table([['Fichier', 'Contenu'], ['precheck_cli_session.txt', 'Transcription CLI intégrale (source de référence)'], ['precheck_results.json', 'Sorties structurées des commandes'], ['precheck_report.txt', 'Résumé de collecte'], ['precheck_report.pdf', 'Synthèse V2 et sorties CLI intégrales']], [73*mm,101*mm], True)
-    story.append(Spacer(1, 12))
-    story.append(Paragraph('Aucune modification de configuration ou de firmware n’est exécutée par le précheck.', styles['BodyV2']))
-
-    def footer(canvas, pdf):
-        canvas.saveState()
-        canvas.setStrokeColor(LINE)
-        canvas.line(18*mm, 16*mm, 192*mm, 16*mm)
-        canvas.setFont('Helvetica', 8)
-        canvas.setFillColor(GREY)
-        canvas.drawString(18*mm, 11*mm, 'ORANGE LAB RUN - IEC | AWX | Précheck Aruba V2')
-        canvas.drawRightString(192*mm, 11*mm, f'Page {pdf.page}')
-        canvas.restoreState()
-    doc.build(story, onFirstPage=footer, onLaterPages=footer)
-
-
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', required=True)
     parser.add_argument('--output', required=True)
     args = parser.parse_args()
-    make_report(args.input, args.output)
+    data = json.loads(Path(args.input).read_text(encoding='utf-8'))
+    required = data.get('required_commands') or REQUIRED
+    optional = data.get('optional_commands') or OPTIONAL
+    commands = required + optional
+    outputs = data.get('results', [])
+    if len(outputs) != len(commands):
+        raise ValueError(f'Nombre de sorties incorrect: {len(outputs)} pour {len(commands)} commandes')
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='MainTitleX', parent=styles['Title'], fontName='Helvetica-Bold', fontSize=17, leading=22, textColor=NAVY, spaceAfter=12))
+    styles.add(ParagraphStyle(name='SectionX', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=12, leading=15, textColor=NAVY, spaceBefore=12, spaceAfter=8))
+    styles.add(ParagraphStyle(name='SmallX', parent=styles['Normal'], fontSize=9, leading=13, spaceAfter=6))
+    styles.add(ParagraphStyle(name='CliTitleX', parent=styles['Heading3'], fontSize=9, leading=12, textColor=NAVY, spaceBefore=10, spaceAfter=5))
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    doc = SimpleDocTemplate(str(output), pagesize=landscape(A4), leftMargin=16*mm, rightMargin=16*mm, topMargin=15*mm, bottomMargin=18*mm, title='Précheck firmware Aruba V2.1')
+    usable = landscape(A4)[0] - 32*mm
+    story = [Paragraph('ORANGE LAB RUN - IEC', styles['MainTitleX']), Paragraph('Précheck firmware Aruba AOS-S | Rapport technique V2.1', styles['SmallX']), Paragraph('01 — Synthèse', styles['SectionX'])]
+    meta = [('Équipement',data.get('hostname','')),('Adresse IP',data.get('ip','')),('Job AWX',str(data.get('awx_job',''))),('Commandes',f'{len(commands)} sorties archivées'),('Contrôle VSF','Non effectué automatiquement'),('Mise à jour firmware','Non autorisée par ce rapport')]
+    table = Table([[Paragraph(escape(str(a)),styles['SmallX']),Paragraph(escape(str(b)),styles['SmallX'])] for a,b in meta],colWidths=[usable*.28,usable*.72],hAlign='LEFT')
+    table.setStyle(TableStyle([('ROWBACKGROUNDS',(0,0),(-1,-1),[PALE,colors.white]),('VALIGN',(0,0),(-1,-1),'TOP'),('BOTTOMPADDING',(0,0),(-1,-1),5)]))
+    story += [table, Paragraph('02 — Matrice de collecte', styles['SectionX'])]
+    rows = [['N°','Commande','Catégorie','Statut']]
+    for i,(cmd,out) in enumerate(zip(commands,outputs),1):
+        bad = not str(out or '').strip() or bool(re.search(r'Invalid input|Invalid command|Unknown command',str(out),re.I))
+        rows.append([f'{i:02d}',cmd,'Essentielle' if i <= len(required) else 'Complémentaire','NON VALIDÉE' if bad else 'COLLECTÉE'])
+    t = Table(rows,colWidths=[usable*.07,usable*.47,usable*.24,usable*.22],repeatRows=1)
+    t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),NAVY),('TEXTCOLOR',(0,0),(-1,0),colors.white),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,PALE]),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),5)]))
+    story += [t, Paragraph('Statut COLLECTÉE : sortie non vide, sans erreur CLI reconnue ; ne constitue pas une validation de conformité.',styles['SmallX']), PageBreak(), Paragraph('03 — Transcription CLI détaillée',styles['SectionX']), Paragraph('Sorties issues du JSON AWX. Échos de commande supprimés uniquement dans ce PDF. Le TXT NFS reste inchangé.',styles['SmallX'])]
+    for i,(cmd,raw) in enumerate(zip(commands,outputs),1):
+        title = Paragraph(f'{i:02d}. {escape(cmd)}',styles['CliTitleX'])
+        clean = remove_echo(raw,cmd)
+        if not clean.strip():
+            clean = '[SORTIE VIDE]'
+        # Landscape A4, Courier 6.4: keeps most wide CLI tables on one line.
+        rendered = [CLILine(line) for line in wrapped_lines(clean,usable,6.4)]
+        story.append(KeepTogether([title,rendered[0]]))
+        story.extend(rendered[1:])
+        story.append(Spacer(1,7))
+    story += [Paragraph('04 — Conclusion et points de vigilance',styles['SectionX']),Paragraph('Ce document atteste uniquement de la collecte. Vérifier manuellement VSF, la compatibilité du firmware cible, la sauvegarde de configuration et le plan de retour arrière avant toute intervention.',styles['SmallX']),Paragraph('Fichiers NFS : precheck_cli_session.txt, precheck_results.json, precheck_report.txt et precheck_report.pdf.',styles['SmallX'])]
+    doc.build(story,onFirstPage=page_footer,onLaterPages=page_footer)
+    print(f'PDF créé : {output}')
+
+if __name__ == '__main__':
+    main()
