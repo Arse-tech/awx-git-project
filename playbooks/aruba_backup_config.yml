@@ -1,122 +1,337 @@
+
 ---
-- name: ORANGE LAB RUN - Sauvegarde configuration Aruba AOS-S
-  hosts: CSE-LAB-B01-ARU-SW
+# ================================================================
+# ORANGE LAB RUN - IEC
+# PRECHECK FIRMWARE ARUBA AOS-S
+#
+# Fichier : playbooks/aruba_firmware_precheck.yml
+#
+# Survey AWX :
+#   target_device        : nom exact du switch dans l'inventaire
+#   expected_vsf_members : nombre de membres physiquement attendus
+#
+# Version de diagnostic :
+#   - Collecte des 18 commandes CLI
+#   - Diagnostic des commandes VSF et logging
+#   - Controle de coherence VSF
+#
+# Lecture seule : aucune modification sur le switch
+# ================================================================
+
+# ================================================================
+# PLAY 1 - SELECTION ET VALIDATION
+# ================================================================
+
+- name: Valider la selection de l'equipement
+  hosts: localhost
   gather_facts: false
-
-  vars:
-    ansible_connection: ansible.netcommon.network_cli
-    ansible_network_os: arubanetworks.aos_switch.arubaoss
-    ansible_command_timeout: 30
-
-    backups_root: "/awx-storage/backups/aruba"
 
   tasks:
 
-    # ------------------------------------------------------------------
-    # COLLECTE DE LA CONFIGURATION
-    # ------------------------------------------------------------------
-
-    - name: Collecter la running-config Aruba
-      ansible.netcommon.cli_command:
-        command: show running-config
-      register: running_config
-
-    # ------------------------------------------------------------------
-    # HORODATAGE
-    # ------------------------------------------------------------------
-
-    - name: Generer l'horodatage
-      ansible.builtin.command: date +%Y%m%d_%H%M%S
-      delegate_to: localhost
-      register: timestamp_cmd
-      changed_when: false
-
-    - name: Generer l'annee
-      ansible.builtin.command: date +%Y
-      delegate_to: localhost
-      register: year_cmd
-      changed_when: false
-
-    - name: Generer le mois
-      ansible.builtin.command: date +%m
-      delegate_to: localhost
-      register: month_cmd
-      changed_when: false
-
-    - name: Generer le jour
-      ansible.builtin.command: date +%d
-      delegate_to: localhost
-      register: day_cmd
-      changed_when: false
-
-    # ------------------------------------------------------------------
-    # DEFINITION DES CHEMINS
-    # ------------------------------------------------------------------
-
-    - name: Definir les chemins de sauvegarde
-      ansible.builtin.set_fact:
-        backup_directory: >-
-          {{ backups_root }}/{{ inventory_hostname }}/{{ year_cmd.stdout }}/{{ month_cmd.stdout }}/{{ day_cmd.stdout }}
-        backup_file: >-
-          {{ backups_root }}/{{ inventory_hostname }}/{{ year_cmd.stdout }}/{{ month_cmd.stdout }}/{{ day_cmd.stdout }}/{{ inventory_hostname }}_{{ timestamp_cmd.stdout }}.cfg
-
-    # ------------------------------------------------------------------
-    # CREATION DU REPERTOIRE NFS
-    # ------------------------------------------------------------------
-
-    - name: Creer le repertoire de sauvegarde
-      ansible.builtin.file:
-        path: "{{ backup_directory }}"
-        state: directory
-        mode: "2775"
-      delegate_to: localhost
-
-    # ------------------------------------------------------------------
-    # SAUVEGARDE DE LA CONFIGURATION
-    # ------------------------------------------------------------------
-
-    - name: Enregistrer la configuration sur le stockage NFS
-      ansible.builtin.copy:
-        content: "{{ running_config.stdout }}\n"
-        dest: "{{ backup_file }}"
-        mode: "0664"
-      delegate_to: localhost
-
-    # ------------------------------------------------------------------
-    # VERIFICATION
-    # ------------------------------------------------------------------
-
-    - name: Verifier le fichier de sauvegarde
-      ansible.builtin.stat:
-        path: "{{ backup_file }}"
-      delegate_to: localhost
-      register: backup_stat
-
-    - name: Valider la sauvegarde
+    - name: Verifier le parametre target_device
       ansible.builtin.assert:
         that:
-          - backup_stat.stat.exists
-          - backup_stat.stat.size | int > 0
-        fail_msg: "Echec de la sauvegarde de la configuration Aruba."
-        success_msg: "La configuration Aruba a ete sauvegardee avec succes."
+          - target_device | default('') | trim | length > 0
+          - target_device | default('') is match('^[A-Za-z0-9_.-]+$')
+          - target_device | default('') in groups['all']
+        fail_msg: >-
+          Equipement invalide ou absent de l'inventaire AWX.
+          Verifiez la variable target_device du Survey.
+        success_msg: >-
+          Equipement selectionne :
+          {{ target_device | default('') }}
 
-    # ------------------------------------------------------------------
-    # RESUME
-    # ------------------------------------------------------------------
+    - name: Verifier le constructeur Aruba
+      ansible.builtin.assert:
+        that:
+          - hostvars[target_device].device_vendor | default('') | lower == 'aruba'
+        fail_msg: >-
+          L'equipement selectionne n'est pas identifie
+          comme un equipement Aruba.
+        success_msg: "Constructeur Aruba valide."
 
-    - name: Afficher le resume de la sauvegarde
+    - name: Verifier le nombre de membres VSF attendus
+      ansible.builtin.assert:
+        that:
+          - expected_vsf_members | default('') | string is match('^[1-4]$')
+        fail_msg: >-
+          Le nombre de membres VSF attendus doit etre
+          renseigne dans le Survey AWX (1 a 4).
+        success_msg: >-
+          Membres VSF attendus :
+          {{ expected_vsf_members | default('') }}
+
+    - name: Ajouter l'equipement au groupe temporaire
+      ansible.builtin.add_host:
+        name: "{{ target_device }}"
+        groups: aruba_selected
+      changed_when: false
+
+
+# ================================================================
+# PLAY 2 - PRECHECK DU SWITCH
+# ================================================================
+
+- name: ORANGE LAB RUN - Precheck firmware Aruba AOS-S
+  hosts: aruba_selected
+  gather_facts: false
+
+  vars:
+
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 60
+
+    # Commandes essentielles
+    precheck_required_commands:
+      - show version
+      - show system
+      - show flash
+      - show interfaces brief
+      - show vlan
+      - show running-config
+
+    # Commandes complementaires
+    precheck_optional_commands:
+      - show interfaces status
+      - show system power-supply
+      - show system fans
+      - show cpu
+      - show logging -r
+      - show vsf
+      - show vsf topology
+      - show time
+      - show spanning-tree
+      - show uptime
+      - show loop-protect
+      - show boot-history
+
+    # Commandes a diagnostiquer temporairement
+    diagnostic_commands:
+      - show logging -r
+      - show vsf
+      - show vsf topology
+
+  tasks:
+
+    # ============================================================
+    # 1 - COLLECTE DES COMMANDES ESSENTIELLES
+    # ============================================================
+
+    - name: Collecter les informations essentielles
+      ansible.netcommon.cli_command:
+        command: "{{ item }}"
+      loop: "{{ precheck_required_commands }}"
+      loop_control:
+        label: "{{ item }}"
+      register: required_results
+      no_log: true
+
+    # ============================================================
+    # 2 - COLLECTE DES COMMANDES COMPLEMENTAIRES
+    # ============================================================
+
+    - name: Collecter les informations complementaires
+      ansible.netcommon.cli_command:
+        command: "{{ item }}"
+      loop: "{{ precheck_optional_commands }}"
+      loop_control:
+        label: "{{ item }}"
+      register: optional_results
+      failed_when: false
+      no_log: true
+
+    # ============================================================
+    # 3 - DIAGNOSTIC TEMPORAIRE DES COMMANDES PROBLEMATIQUES
+    # ============================================================
+
+    - name: Diagnostiquer les commandes VSF et logging
+      ansible.builtin.debug:
+        msg:
+          - "Commande : {{ item.item }}"
+          - "Failed : {{ item.failed | default(false) }}"
+          - "Message : {{ item.msg | default('Aucun') }}"
+          - >-
+            Sortie vide :
+            {{ item.stdout | default('') | trim | length == 0 }}
+          - >-
+            Longueur sortie :
+            {{ item.stdout | default('') | length }}
+          - >-
+            Sortie CLI :
+            {{ item.stdout | default('') | truncate(600) }}
+      loop: "{{ optional_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.item in diagnostic_commands
+
+    # ============================================================
+    # 4 - VALIDATION DES COMMANDES ESSENTIELLES
+    # ============================================================
+
+    - name: Valider les commandes essentielles
+      ansible.builtin.assert:
+        that:
+          - item.stdout | default('') | trim | length > 0
+          - not (item.failed | default(false))
+          - "'Invalid input' not in (item.stdout | default(''))"
+          - "'Invalid command' not in (item.stdout | default(''))"
+          - "'Unknown command' not in (item.stdout | default(''))"
+        fail_msg: "ECHEC : {{ item.item }}"
+        success_msg: "OK : {{ item.item }}"
+      loop: "{{ required_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      no_log: true
+
+    - name: Confirmer la validation des commandes essentielles
+      ansible.builtin.debug:
+        msg: >-
+          Les {{ precheck_required_commands | length }}
+          commandes essentielles ont ete validees.
+
+    # ============================================================
+    # 5 - STATUT DES COMMANDES COMPLEMENTAIRES
+    # ============================================================
+
+    - name: Afficher le statut des commandes complementaires
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item }} :
+          {{
+            'NON VALIDEE'
+            if (
+              item.failed | default(false)
+              or item.stdout | default('') | trim | length == 0
+              or 'Invalid input' in (item.stdout | default(''))
+              or 'Invalid command' in (item.stdout | default(''))
+              or 'Unknown command' in (item.stdout | default(''))
+            )
+            else 'COLLECTEE'
+          }}
+      loop: "{{ optional_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # ============================================================
+    # 6 - RECUPERATION DE LA SORTIE VSF
+    # ============================================================
+
+    - name: Recuperer la sortie de show vsf
+      ansible.builtin.set_fact:
+        vsf_output: >-
+          {{
+            (
+              optional_results.results
+              | selectattr('item', 'equalto', 'show vsf')
+              | map(attribute='stdout')
+              | first
+            ) | default('')
+          }}
+      no_log: true
+
+    - name: Verifier que la sortie VSF est exploitable
+      ansible.builtin.assert:
+        that:
+          - vsf_output | trim | length > 0
+          - "'VSF Domain ID' in vsf_output"
+          - "'VSF Status' in vsf_output"
+        fail_msg: >-
+          BLOCKED - Impossible de recuperer un etat VSF
+          exploitable depuis le switch.
+        success_msg: "Sortie VSF exploitable."
+
+    # ============================================================
+    # 7 - ANALYSE DES MEMBRES VSF
+    # ============================================================
+
+    - name: Compter les membres VSF
+      ansible.builtin.set_fact:
+        vsf_active_members: >-
+          {{
+            vsf_output
+            | regex_findall(
+                '(?im)^\\s*\\d+\\s+[0-9a-f:-]+\\s+.*?\\s+(?:Commander|Standby|Member)\\s*$'
+              )
+            | length
+            | int
+          }}
+        vsf_missing_members: >-
+          {{
+            vsf_output
+            | regex_findall(
+                '(?im)^\\s*\\d+\\s+[0-9a-f:-]+\\s+.*?\\s+Missing\\s*$'
+              )
+            | length
+            | int
+          }}
+
+    - name: Determiner le statut VSF
+      ansible.builtin.set_fact:
+        vsf_status: >-
+          {{
+            'BLOCKED'
+            if (
+              (vsf_active_members | int)
+              != (expected_vsf_members | int)
+            )
+            else (
+              'WARNING'
+              if (vsf_missing_members | int) > 0
+              else 'READY'
+            )
+          }}
+
+    # ============================================================
+    # 8 - DIAGNOSTIC VSF
+    # ============================================================
+
+    - name: Afficher le diagnostic VSF
       ansible.builtin.debug:
         msg:
           - "=============================================="
-          - " ORANGE LAB RUN - IEC"
-          - " SAUVEGARDE CONFIGURATION ARUBA"
+          - " DIAGNOSTIC VSF"
           - "=============================================="
           - "Equipement : {{ inventory_hostname }}"
-          - "Adresse IP : {{ ansible_host }}"
+          - "Membres attendus : {{ expected_vsf_members }}"
+          - "Membres operationnels : {{ vsf_active_members }}"
+          - "Membres configures absents : {{ vsf_missing_members }}"
+          - "Statut VSF : {{ vsf_status | trim }}"
+          - "=============================================="
+
+    - name: Bloquer si la topologie VSF est incoherente
+      ansible.builtin.assert:
+        that:
+          - vsf_status | trim != 'BLOCKED'
+        fail_msg: >-
+          BLOCKED - Le nombre de membres VSF operationnels
+          ne correspond pas au nombre attendu.
+          Verification manuelle necessaire.
+        success_msg: >-
+          Controle VSF termine avec le statut
+          {{ vsf_status | trim }}.
+
+    # ============================================================
+    # 9 - RESUME FINAL
+    # ============================================================
+
+    - name: Afficher le resume du precheck
+      ansible.builtin.debug:
+        msg:
+          - "================================================"
+          - " ORANGE LAB RUN - IEC"
+          - " PRECHECK FIRMWARE ARUBA"
+          - "================================================"
+          - "Equipement : {{ inventory_hostname }}"
+          - "Adresse IP : {{ ansible_host | default('Non definie') }}"
           - "Constructeur : {{ device_vendor | default('Aruba') }}"
           - "Role : {{ device_role | default('Non defini') }}"
-          - "Statut : {{ device_status | default('Non defini') }}"
-          - "Fichier : {{ backup_file }}"
-          - "Taille : {{ backup_stat.stat.size }} octets"
-          - "Statut sauvegarde : SUCCES"
-          - "=============================================="
+          - "Statut inventaire : {{ device_status | default('Non defini') }}"
+          - "Commandes essentielles : {{ precheck_required_commands | length }}"
+          - "Commandes complementaires : {{ precheck_optional_commands | length }}"
+          - "Membres VSF attendus : {{ expected_vsf_members }}"
+          - "Membres VSF operationnels : {{ vsf_active_members }}"
+          - "Membres VSF absents : {{ vsf_missing_members }}"
+          - "Statut VSF : {{ vsf_status | trim }}"
+          - "Aucune modification effectuee sur le switch"
+          - "================================================"
