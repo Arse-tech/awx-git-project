@@ -28,7 +28,6 @@
     ansible_connection: ansible.netcommon.network_cli
     ansible_network_os: arubanetworks.aos_switch.arubaoss
     ansible_command_timeout: 60
-    nfs_root: /awx-storage
     archive_root: /awx-storage/reports/aruba
     archive_run_id: "{{ tower_job_id | default(awx_job_id | default('manual-' ~ now(utc=true, fmt='%Y%m%dT%H%M%SZ'))) }}"
     archive_dir: "{{ archive_root }}/{{ inventory_hostname }}/job-{{ archive_run_id }}"
@@ -170,7 +169,7 @@
       vars:
         ansible_connection: local
 
-    - name: Generer le rapport PDF sur NFS
+    - name: Generer le rapport PDF V2.1 sur NFS
       ansible.builtin.command:
         argv:
           - python3
