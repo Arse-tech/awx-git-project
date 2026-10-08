@@ -1,1 +1,32 @@
 
+---
+- name: ORANGE LAB RUN - Precheck firmware Aruba AOS-S
+  hosts: aruba_aos_switch
+  gather_facts: false
+
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 60
+
+    precheck_required_commands:
+      - show version
+      - show system
+      - show flash
+      - show interfaces brief
+      - show vlan
+      - show running-config
+
+    precheck_optional_commands:
+      - show interfaces status
+      - show system power-supply
+      - show system fans
+      - show cpu
+      - show log
+      - show vsf
+      - show vsf topology
+      - show time
+      - show spanning-tree
+      - show uptime
+      - show loop-protect
+      - show boot-history
