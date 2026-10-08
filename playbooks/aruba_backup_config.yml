@@ -7,19 +7,20 @@
 # Fichier : playbooks/aruba_firmware_precheck.yml
 #
 # Survey AWX :
-#   target_device        : nom exact du switch dans l'inventaire
-#   expected_vsf_members : nombre de membres physiquement attendus
+#   target_device : nom exact du switch dans l'inventaire
 #
-# Version de diagnostic :
-#   - Collecte des 18 commandes CLI
-#   - Diagnostic des commandes VSF et logging
-#   - Controle de coherence VSF
+# Commandes :
+#   6 essentielles
+#   10 complementaires
 #
-# Lecture seule : aucune modification sur le switch
+# Aucune modification de configuration
+# Aucun transfert de firmware
+# Aucun redemarrage
 # ================================================================
 
+
 # ================================================================
-# PLAY 1 - SELECTION ET VALIDATION
+# PLAY 1 - VALIDATION DE L'EQUIPEMENT SELECTIONNE
 # ================================================================
 
 - name: Valider la selection de l'equipement
@@ -44,22 +45,13 @@
     - name: Verifier le constructeur Aruba
       ansible.builtin.assert:
         that:
-          - hostvars[target_device].device_vendor | default('') | lower == 'aruba'
+          - hostvars[target_device].device_vendor
+            | default('')
+            | lower == 'aruba'
         fail_msg: >-
           L'equipement selectionne n'est pas identifie
           comme un equipement Aruba.
         success_msg: "Constructeur Aruba valide."
-
-    - name: Verifier le nombre de membres VSF attendus
-      ansible.builtin.assert:
-        that:
-          - expected_vsf_members | default('') | string is match('^[1-4]$')
-        fail_msg: >-
-          Le nombre de membres VSF attendus doit etre
-          renseigne dans le Survey AWX (1 a 4).
-        success_msg: >-
-          Membres VSF attendus :
-          {{ expected_vsf_members | default('') }}
 
     - name: Ajouter l'equipement au groupe temporaire
       ansible.builtin.add_host:
@@ -69,7 +61,7 @@
 
 
 # ================================================================
-# PLAY 2 - PRECHECK DU SWITCH
+# PLAY 2 - PRECHECK FIRMWARE DU SWITCH
 # ================================================================
 
 - name: ORANGE LAB RUN - Precheck firmware Aruba AOS-S
@@ -82,7 +74,10 @@
     ansible_network_os: arubanetworks.aos_switch.arubaoss
     ansible_command_timeout: 60
 
-    # Commandes essentielles
+    # ============================================================
+    # COMMANDES ESSENTIELLES
+    # ============================================================
+
     precheck_required_commands:
       - show version
       - show system
@@ -91,26 +86,21 @@
       - show vlan
       - show running-config
 
-    # Commandes complementaires
+    # ============================================================
+    # COMMANDES COMPLEMENTAIRES
+    # ============================================================
+
     precheck_optional_commands:
       - show interfaces status
       - show system power-supply
       - show system fans
       - show cpu
-      - show logging -r
-      - show vsf
       - show vsf topology
       - show time
       - show spanning-tree
       - show uptime
       - show loop-protect
       - show boot-history
-
-    # Commandes a diagnostiquer temporairement
-    diagnostic_commands:
-      - show logging -r
-      - show vsf
-      - show vsf topology
 
   tasks:
 
@@ -142,31 +132,7 @@
       no_log: true
 
     # ============================================================
-    # 3 - DIAGNOSTIC TEMPORAIRE DES COMMANDES PROBLEMATIQUES
-    # ============================================================
-
-    - name: Diagnostiquer les commandes VSF et logging
-      ansible.builtin.debug:
-        msg:
-          - "Commande : {{ item.item }}"
-          - "Failed : {{ item.failed | default(false) }}"
-          - "Message : {{ item.msg | default('Aucun') }}"
-          - >-
-            Sortie vide :
-            {{ item.stdout | default('') | trim | length == 0 }}
-          - >-
-            Longueur sortie :
-            {{ item.stdout | default('') | length }}
-          - >-
-            Sortie CLI :
-            {{ item.stdout | default('') | truncate(600) }}
-      loop: "{{ optional_results.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-      when: item.item in diagnostic_commands
-
-    # ============================================================
-    # 4 - VALIDATION DES COMMANDES ESSENTIELLES
+    # 3 - VALIDATION DES COMMANDES ESSENTIELLES
     # ============================================================
 
     - name: Valider les commandes essentielles
@@ -191,7 +157,7 @@
           commandes essentielles ont ete validees.
 
     # ============================================================
-    # 5 - STATUT DES COMMANDES COMPLEMENTAIRES
+    # 4 - STATUT DES COMMANDES COMPLEMENTAIRES
     # ============================================================
 
     - name: Afficher le statut des commandes complementaires
@@ -214,105 +180,7 @@
         label: "{{ item.item }}"
 
     # ============================================================
-    # 6 - RECUPERATION DE LA SORTIE VSF
-    # ============================================================
-
-    - name: Recuperer la sortie de show vsf
-      ansible.builtin.set_fact:
-        vsf_output: >-
-          {{
-            (
-              optional_results.results
-              | selectattr('item', 'equalto', 'show vsf')
-              | map(attribute='stdout')
-              | first
-            ) | default('')
-          }}
-      no_log: true
-
-    - name: Verifier que la sortie VSF est exploitable
-      ansible.builtin.assert:
-        that:
-          - vsf_output | trim | length > 0
-          - "'VSF Domain ID' in vsf_output"
-          - "'VSF Status' in vsf_output"
-        fail_msg: >-
-          BLOCKED - Impossible de recuperer un etat VSF
-          exploitable depuis le switch.
-        success_msg: "Sortie VSF exploitable."
-
-    # ============================================================
-    # 7 - ANALYSE DES MEMBRES VSF
-    # ============================================================
-
-    - name: Compter les membres VSF
-      ansible.builtin.set_fact:
-        vsf_active_members: >-
-          {{
-            vsf_output
-            | regex_findall(
-                '(?im)^\\s*\\d+\\s+[0-9a-f:-]+\\s+.*?\\s+(?:Commander|Standby|Member)\\s*$'
-              )
-            | length
-            | int
-          }}
-        vsf_missing_members: >-
-          {{
-            vsf_output
-            | regex_findall(
-                '(?im)^\\s*\\d+\\s+[0-9a-f:-]+\\s+.*?\\s+Missing\\s*$'
-              )
-            | length
-            | int
-          }}
-
-    - name: Determiner le statut VSF
-      ansible.builtin.set_fact:
-        vsf_status: >-
-          {{
-            'BLOCKED'
-            if (
-              (vsf_active_members | int)
-              != (expected_vsf_members | int)
-            )
-            else (
-              'WARNING'
-              if (vsf_missing_members | int) > 0
-              else 'READY'
-            )
-          }}
-
-    # ============================================================
-    # 8 - DIAGNOSTIC VSF
-    # ============================================================
-
-    - name: Afficher le diagnostic VSF
-      ansible.builtin.debug:
-        msg:
-          - "=============================================="
-          - " DIAGNOSTIC VSF"
-          - "=============================================="
-          - "Equipement : {{ inventory_hostname }}"
-          - "Membres attendus : {{ expected_vsf_members }}"
-          - "Membres operationnels : {{ vsf_active_members }}"
-          - "Membres configures absents : {{ vsf_missing_members }}"
-          - "Statut VSF : {{ vsf_status | trim }}"
-          - "=============================================="
-
-    - name: Bloquer si la topologie VSF est incoherente
-      ansible.builtin.assert:
-        that:
-          - vsf_status | trim != 'BLOCKED'
-        fail_msg: >-
-          BLOCKED - Le nombre de membres VSF operationnels
-          ne correspond pas au nombre attendu.
-          Verification manuelle necessaire.
-        success_msg: >-
-          Controle VSF termine avec le statut
-          {{ vsf_status | trim }}.
-
-    # ============================================================
-    # 9 - RESUME FINAL
+    # 5 - RESUME FINAL DU PRECHECK
     # ============================================================
 
     - name: Afficher le resume du precheck
@@ -329,9 +197,7 @@
           - "Statut inventaire : {{ device_status | default('Non defini') }}"
           - "Commandes essentielles : {{ precheck_required_commands | length }}"
           - "Commandes complementaires : {{ precheck_optional_commands | length }}"
-          - "Membres VSF attendus : {{ expected_vsf_members }}"
-          - "Membres VSF operationnels : {{ vsf_active_members }}"
-          - "Membres VSF absents : {{ vsf_missing_members }}"
-          - "Statut VSF : {{ vsf_status | trim }}"
+          - "Precheck de collecte termine"
+          - "Controle automatique VSF : non effectue"
           - "Aucune modification effectuee sur le switch"
           - "================================================"
