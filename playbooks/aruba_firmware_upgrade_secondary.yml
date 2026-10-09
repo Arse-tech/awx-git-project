@@ -1,43 +1,73 @@
+
 ---
-# Aruba 2930F - preflight Secondary (SAFE / READ ONLY)
-# The firmware transfer is intentionally NOT executed in this revision.
-- name: Valider la cible du workflow
+# Aruba 2930F - Upgrade Secondary
+# VERSION SECURISEE : PREFLIGHT UNIQUEMENT
+# Aucun transfert TFTP, aucune ecriture flash, aucun redemarrage.
+
+- name: Valider la cible AWX
   hosts: localhost
   gather_facts: false
+
   tasks:
-    - name: Valider le Survey et l'inventaire
+    - name: Verifier que target_device est fourni
       ansible.builtin.assert:
         that:
+          - target_device is defined
+          - target_device | default('') | length > 0
           - target_device | default('') is match('^[A-Za-z0-9_.-]+$')
+        fail_msg: >-
+          Variable target_device absente ou invalide.
+          Renseigner target_device dans le Survey ou les variables AWX.
+
+    - name: Verifier la presence dans l'inventaire
+      ansible.builtin.assert:
+        that:
           - target_device in groups['all']
+        fail_msg: "Equipement absent de l'inventaire AWX."
+
+    - name: Verifier le constructeur
+      ansible.builtin.assert:
+        that:
           - hostvars[target_device].device_vendor | default('') | lower == 'aruba'
-        fail_msg: "Cible AWX invalide."
+        fail_msg: "L'equipement selectionne n'est pas identifie comme Aruba."
+
     - name: Construire le groupe temporaire
       ansible.builtin.add_host:
         name: "{{ target_device }}"
         groups: aruba_workflow_target
       changed_when: false
 
-- name: Preflight firmware Aruba Secondary - sans ecriture
+
+- name: Preflight firmware Aruba Secondary - lecture seule
   hosts: aruba_workflow_target
   gather_facts: false
+
   vars:
     ansible_connection: ansible.netcommon.network_cli
     ansible_network_os: arubanetworks.aos_switch.arubaoss
     ansible_command_timeout: 120
-    firmware_target: 'WC.16.11.0030'
-    firmware_primary_expected: 'WC.16.11.0010'
-    firmware_secondary_expected: 'WC.16.07.0003'
-    firmware_file: '/awx-storage/firmwares/aruba/2930F/WC_16_11_0030.swi'
-    firmware_sha256: '4749334ebdb4989c6176643b2daf57514441348778899895dc08d1c1d546e42d'
-    tftp_server: '172.16.23.162'
-    tftp_filename: 'aruba/2930F/WC_16_11_0030.swi'
-    archive_root: '/awx-storage/reports/aruba'
+
+    firmware_target: "WC.16.11.0030"
+    firmware_primary_expected: "WC.16.11.0010"
+    firmware_secondary_expected: "WC.16.07.0003"
+
+    firmware_file: "/awx-storage/firmwares/aruba/2930F/WC_16_11_0030.swi"
+    firmware_size_expected: 30294326
+    firmware_sha256: "4749334ebdb4989c6176643b2daf57514441348778899895dc08d1c1d546e42d"
+
+    tftp_server: "172.16.23.162"
+    tftp_filename: "aruba/2930F/WC_16_11_0030.swi"
+
+    archive_root: "/awx-storage/reports/aruba"
     workflow_id: "{{ awx_workflow_job_id | default('manual') }}"
-    run_dir: "{{ archive_root }}/{{ inventory_hostname }}/upgrade-{{ workflow_id }}"
-    proposed_command: "copy tftp flash {{ tftp_server }} {{ tftp_filename }} secondary"
+    job_id: "{{ awx_job_id | default('manual') }}"
+    run_dir: "{{ archive_root }}/{{ inventory_hostname }}/upgrade-{{ workflow_id }}-job-{{ job_id }}"
+
+    proposed_command: >-
+      copy tftp flash {{ tftp_server }} {{ tftp_filename }} secondary
+
   tasks:
-    - name: Lire les metadonnees et le SHA-256 du SWI dans l'EE
+    - name: Lire les metadonnees du firmware dans l'EE
       ansible.builtin.stat:
         path: "{{ firmware_file }}"
         checksum_algorithm: sha256
@@ -46,65 +76,97 @@
       vars:
         ansible_connection: local
 
-    - name: Verifier le SWI sans presumer de la capacite flash
+    - name: Verifier le fichier et son integrite
       ansible.builtin.assert:
         that:
           - image_file.stat.isreg | default(false)
-          - image_file.stat.size | default(0) | int == 30294326
+          - image_file.stat.size | default(0) | int == firmware_size_expected
           - image_file.stat.checksum | default('') == firmware_sha256
-        fail_msg: "Fichier SWI absent, taille incorrecte ou SHA-256 non conforme."
+        fail_msg: "Firmware absent, taille incorrecte ou SHA-256 non conforme."
 
-    - name: Lire show system
+    - name: Collecter show system
       ansible.netcommon.cli_command:
         command: show system
       register: system_result
       changed_when: false
 
-    - name: Lire show flash
+    - name: Collecter show flash
       ansible.netcommon.cli_command:
         command: show flash
       register: flash_result
       changed_when: false
 
-    - name: Extraire les versions des partitions
+    - name: Extraire les versions Primary et Secondary
       ansible.builtin.set_fact:
-        primary_versions: "{{ flash_result.stdout | regex_findall('(?im)^\\s*Primary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+)') }}"
-        secondary_versions: "{{ flash_result.stdout | regex_findall('(?im)^\\s*Secondary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+)') }}"
+        primary_versions: >-
+          {{ flash_result.stdout |
+             regex_findall('(?im)Primary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+)') }}
+        secondary_versions: >-
+          {{ flash_result.stdout |
+             regex_findall('(?im)Secondary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+)') }}
       changed_when: false
 
-    - name: Bloquer si les partitions ne correspondent pas a l'etat attendu
+    - name: Verifier les partitions avant transfert
       ansible.builtin.assert:
         that:
           - primary_versions | length == 1
           - secondary_versions | length == 1
           - primary_versions[0] == firmware_primary_expected
           - secondary_versions[0] == firmware_secondary_expected
-          - firmware_primary_expected in system_result.stdout
-          - "'Memory   - Total' in system_result.stdout"
-          - "'Free' in system_result.stdout"
-        fail_msg: "Etat du switch non conforme ou sortie CLI non interpretable. Aucune ecriture autorisee."
+        fail_msg: >-
+          Versions Primary ou Secondary inattendues.
+          Aucun transfert autorise.
 
-    - name: Creer le repertoire de traces sur le NFS
+    - name: Verifier les informations systeme
+      ansible.builtin.assert:
+        that:
+          - firmware_primary_expected in system_result.stdout
+          - system_result.stdout is search('(?m)Memory\s*-\s*Total\s*:')
+          - system_result.stdout is search('(?m)Free\s*:')
+        fail_msg: >-
+          Sortie show system incomplete ou version active inattendue.
+
+    - name: Creer le repertoire NFS
       ansible.builtin.file:
         path: "{{ run_dir }}"
         state: directory
-        mode: '0700'
+        mode: "0700"
       delegate_to: localhost
       vars:
         ansible_connection: local
 
-    - name: Archiver le controle de securite et la commande proposee
+    - name: Archiver le rapport de preflight
       ansible.builtin.copy:
         dest: "{{ run_dir }}/secondary_preflight.json"
-        mode: '0600'
-        content: "{{ {'phase': 'SECONDARY_PREFLIGHT', 'execution': 'BLOCKED_READ_ONLY', 'target': inventory_hostname, 'job': awx_job_id | default('manual'), 'firmware': firmware_target, 'file_size_bytes': image_file.stat.size, 'sha256': image_file.stat.checksum, 'primary_before': primary_versions[0], 'secondary_before': secondary_versions[0], 'proposed_command_not_executed': proposed_command, 'flash_capacity_confirmed': false, 'compatibility_confirmed': false, 'show_flash': flash_result.stdout, 'show_system': system_result.stdout} | to_nice_json }}\n"
+        mode: "0600"
+        content: |
+          {{
+            {
+              'phase': 'SECONDARY_PREFLIGHT',
+              'execution': 'BLOCKED_READ_ONLY',
+              'target': inventory_hostname,
+              'job': job_id,
+              'firmware': firmware_target,
+              'file_size_bytes': image_file.stat.size,
+              'sha256': image_file.stat.checksum,
+              'primary_before': primary_versions[0],
+              'secondary_before': secondary_versions[0],
+              'proposed_command_not_executed': proposed_command,
+              'flash_capacity_confirmed': false,
+              'compatibility_confirmed': false,
+              'show_flash': flash_result.stdout,
+              'show_system': system_result.stdout
+            } | to_nice_json
+          }}
       delegate_to: localhost
       vars:
         ansible_connection: local
 
-    - name: Interdire le transfert tant que les pre-requis ne sont pas homologues
+    - name: Bloquer volontairement toute installation
       ansible.builtin.fail:
         msg: >-
-          SECURITE : preflight archive dans {{ run_dir }}/secondary_preflight.json.
-          Aucun transfert ni redemarrage execute. Capacite flash, compatibilite
-          constructeur et comportement des invites CLI restent a homologuer.
+          SECURITE : preflight archive dans
+          {{ run_dir }}/secondary_preflight.json.
+          Aucun transfert TFTP ni redemarrage execute.
+          Capacite flash et compatibilite constructeur
+          restent a homologuer.
