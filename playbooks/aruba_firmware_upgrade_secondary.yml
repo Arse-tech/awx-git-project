@@ -96,15 +96,15 @@
       register: flash_result
       changed_when: false
 
-    - name: Extraire les versions Primary et Secondary
-      ansible.builtin.set_fact:
-        primary_versions: >-
-          {{ flash_result.stdout |
-             regex_findall('(?im)Primary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+)') }}
-        secondary_versions: >-
-          {{ flash_result.stdout |
-             regex_findall('(?im)Secondary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+)') }}
-      changed_when: false
+ - name: Extraire les versions Primary et Secondary
+  ansible.builtin.set_fact:
+    primary_versions: >-
+      {{ flash_result.stdout |
+         regex_findall('(?im)Primary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+\.\d+)') }}
+    secondary_versions: >-
+      {{ flash_result.stdout |
+         regex_findall('(?im)Secondary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+\.\d+)') }}
+  changed_when: false
 
     - name: Verifier les partitions avant transfert
       ansible.builtin.assert:
