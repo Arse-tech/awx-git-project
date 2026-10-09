@@ -1,14 +1,22 @@
 
 ---
-# Aruba 2930F - Upgrade Secondary
-# VERSION SECURISEE : PREFLIGHT UNIQUEMENT
-# Aucun transfert TFTP, aucune ecriture flash, aucun redemarrage.
+# ============================================================
+# Aruba 2930F - Firmware Upgrade Secondary
+# Phase 03 - PREFLIGHT UNIQUEMENT
+#
+# SECURITE :
+# - Aucune commande copy tftp flash executee
+# - Aucune ecriture sur le switch
+# - Aucun boot / reboot
+# - Echec volontaire a la derniere tache
+# ============================================================
 
 - name: Valider la cible AWX
   hosts: localhost
   gather_facts: false
 
   tasks:
+
     - name: Verifier que target_device est fourni
       ansible.builtin.assert:
         that:
@@ -17,19 +25,25 @@
           - target_device | default('') is match('^[A-Za-z0-9_.-]+$')
         fail_msg: >-
           Variable target_device absente ou invalide.
-          Renseigner target_device dans le Survey ou les variables AWX.
+          Renseigner target_device dans le Survey
+          ou les variables du Job Template AWX.
 
     - name: Verifier la presence dans l'inventaire
       ansible.builtin.assert:
         that:
           - target_device in groups['all']
-        fail_msg: "Equipement absent de l'inventaire AWX."
+        fail_msg: >-
+          Equipement absent de l'inventaire AWX.
 
     - name: Verifier le constructeur
       ansible.builtin.assert:
         that:
-          - hostvars[target_device].device_vendor | default('') | lower == 'aruba'
-        fail_msg: "L'equipement selectionne n'est pas identifie comme Aruba."
+          - hostvars[target_device].device_vendor
+            | default('')
+            | lower == 'aruba'
+        fail_msg: >-
+          L'equipement selectionne n'est pas identifie
+          comme un switch Aruba.
 
     - name: Construire le groupe temporaire
       ansible.builtin.add_host:
@@ -43,30 +57,56 @@
   gather_facts: false
 
   vars:
+
+    # --------------------------------------------------------
+    # Connexion Aruba
+    # --------------------------------------------------------
     ansible_connection: ansible.netcommon.network_cli
     ansible_network_os: arubanetworks.aos_switch.arubaoss
     ansible_command_timeout: 120
 
+    # --------------------------------------------------------
+    # Versions attendues
+    # --------------------------------------------------------
     firmware_target: "WC.16.11.0030"
     firmware_primary_expected: "WC.16.11.0010"
     firmware_secondary_expected: "WC.16.07.0003"
 
+    # --------------------------------------------------------
+    # Firmware local dans l'Execution Environment
+    # --------------------------------------------------------
     firmware_file: "/awx-storage/firmwares/aruba/2930F/WC_16_11_0030.swi"
     firmware_size_expected: 30294326
     firmware_sha256: "4749334ebdb4989c6176643b2daf57514441348778899895dc08d1c1d546e42d"
 
+    # --------------------------------------------------------
+    # Serveur TFTP
+    # Commande preparee mais JAMAIS executee
+    # --------------------------------------------------------
     tftp_server: "172.16.23.162"
     tftp_filename: "aruba/2930F/WC_16_11_0030.swi"
 
+    proposed_command: >-
+      copy tftp flash {{ tftp_server }}
+      {{ tftp_filename }} secondary
+
+    # --------------------------------------------------------
+    # Archivage NFS
+    # --------------------------------------------------------
     archive_root: "/awx-storage/reports/aruba"
+
     workflow_id: "{{ awx_workflow_job_id | default('manual') }}"
     job_id: "{{ awx_job_id | default('manual') }}"
-    run_dir: "{{ archive_root }}/{{ inventory_hostname }}/upgrade-{{ workflow_id }}-job-{{ job_id }}"
 
-    proposed_command: >-
-      copy tftp flash {{ tftp_server }} {{ tftp_filename }} secondary
+    run_dir: >-
+      {{ archive_root }}/{{ inventory_hostname }}/upgrade-{{ workflow_id }}-job-{{ job_id }}
 
   tasks:
+
+    # ========================================================
+    # 1. CONTROLE DU FICHIER FIRMWARE
+    # ========================================================
+
     - name: Lire les metadonnees du firmware dans l'EE
       ansible.builtin.stat:
         path: "{{ firmware_file }}"
@@ -82,7 +122,13 @@
           - image_file.stat.isreg | default(false)
           - image_file.stat.size | default(0) | int == firmware_size_expected
           - image_file.stat.checksum | default('') == firmware_sha256
-        fail_msg: "Firmware absent, taille incorrecte ou SHA-256 non conforme."
+        fail_msg: >-
+          Firmware absent, taille incorrecte
+          ou SHA-256 non conforme.
+
+    # ========================================================
+    # 2. COLLECTE DES INFORMATIONS DU SWITCH
+    # ========================================================
 
     - name: Collecter show system
       ansible.netcommon.cli_command:
@@ -96,15 +142,47 @@
       register: flash_result
       changed_when: false
 
- - name: Extraire les versions Primary et Secondary
-  ansible.builtin.set_fact:
-    primary_versions: >-
-      {{ flash_result.stdout |
-         regex_findall('(?im)Primary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+\.\d+)') }}
-    secondary_versions: >-
-      {{ flash_result.stdout |
-         regex_findall('(?im)Secondary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+\.\d+)') }}
-  changed_when: false
+    # ========================================================
+    # 3. EXTRACTION DES VERSIONS PRIMARY / SECONDARY
+    #
+    # Correction :
+    # Ancien regex : WC\.\d+\.\d+
+    # Nouveau regex : WC\.\d+\.\d+\.\d+
+    #
+    # Exemple :
+    # WC.16.11.0010
+    # WC.16.07.0003
+    # ========================================================
+
+    - name: Extraire les versions Primary et Secondary
+      ansible.builtin.set_fact:
+        primary_versions: >-
+          {{
+            flash_result.stdout
+            | regex_findall(
+                '(?im)Primary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+\.\d+)'
+              )
+          }}
+        secondary_versions: >-
+          {{
+            flash_result.stdout
+            | regex_findall(
+                '(?im)Secondary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+\.\d+)'
+              )
+          }}
+      changed_when: false
+
+    - name: Afficher les versions extraites
+      ansible.builtin.debug:
+        msg:
+          - "Primary detectee : {{ primary_versions }}"
+          - "Secondary detectee : {{ secondary_versions }}"
+          - "Primary attendue : {{ firmware_primary_expected }}"
+          - "Secondary attendue : {{ firmware_secondary_expected }}"
+
+    # ========================================================
+    # 4. VALIDATION DES PARTITIONS
+    # ========================================================
 
     - name: Verifier les partitions avant transfert
       ansible.builtin.assert:
@@ -124,7 +202,12 @@
           - system_result.stdout is search('(?m)Memory\s*-\s*Total\s*:')
           - system_result.stdout is search('(?m)Free\s*:')
         fail_msg: >-
-          Sortie show system incomplete ou version active inattendue.
+          Sortie show system incomplete
+          ou version active inattendue.
+
+    # ========================================================
+    # 5. ARCHIVAGE DU PREFLIGHT SUR NFS
+    # ========================================================
 
     - name: Creer le repertoire NFS
       ansible.builtin.file:
@@ -162,11 +245,16 @@
       vars:
         ansible_connection: local
 
+    # ========================================================
+    # 6. VERROU DE SECURITE
+    # ========================================================
+
     - name: Bloquer volontairement toute installation
       ansible.builtin.fail:
         msg: >-
           SECURITE : preflight archive dans
           {{ run_dir }}/secondary_preflight.json.
           Aucun transfert TFTP ni redemarrage execute.
-          Capacite flash et compatibilite constructeur
-          restent a homologuer.
+          Capacite flash, compatibilite constructeur
+          et comportement des invites CLI restent
+          a homologuer.
