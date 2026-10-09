@@ -1,0 +1,119 @@
+---
+- name: Valider la cible Aruba
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Valider le Survey et l'inventaire
+      ansible.builtin.assert:
+        that:
+          - target_device | default('') is match('^[A-Za-z0-9_.-]+$')
+          - target_device in groups['all']
+          - hostvars[target_device].device_vendor | default('') | lower == 'aruba'
+        fail_msg: 'Cible absente, invalide ou non Aruba.'
+    - name: Creer le groupe cible
+      ansible.builtin.add_host:
+        name: '{{ target_device }}'
+        groups: aruba_workflow_target
+      changed_when: false
+
+- name: Upgrade SECONDARY - controle securise uniquement
+  hosts: aruba_workflow_target
+  gather_facts: false
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 120
+    firmware_target: WC.16.11.0030
+    firmware_path: /awx-storage/firmwares/aruba/2930F/WC_16_11_0030.swi
+    firmware_sha256: 4749334ebdb4989c6176643b2daf57514441348778899895dc08d1c1d546e42d
+    primary_expected: WC.16.11.0010
+    secondary_expected: WC.16.07.0003
+    archive_root: /awx-storage/reports/aruba
+    workflow_id: "{{ awx_workflow_job_id | default('manual') }}"
+    run_dir: "{{ archive_root }}/{{ inventory_hostname }}/upgrade-secondary-{{ workflow_id }}-job-{{ awx_job_id | default('manual') }}"
+  tasks:
+    - name: Collecter les controles et archiver meme en cas d'echec
+      block:
+        - name: Verifier le fichier et calculer son SHA-256 dans l'EE
+          ansible.builtin.stat:
+            path: '{{ firmware_path }}'
+            checksum_algorithm: sha256
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
+          register: image_file
+          changed_when: false
+
+        - name: Verifier presence, integrite et taille du SWI
+          ansible.builtin.assert:
+            that:
+              - image_file.stat.isreg | default(false)
+              - image_file.stat.checksum | default('') == firmware_sha256
+              - image_file.stat.size | default(0) | int > 0
+            fail_msg: 'Firmware absent, vide ou SHA-256 non conforme : transfert interdit.'
+
+        - name: Lire le systeme sans modification
+          ansible.netcommon.cli_command:
+            command: show system
+          register: system_before
+          changed_when: false
+
+        - name: Lire les partitions sans modification
+          ansible.netcommon.cli_command:
+            command: show flash
+          register: flash_before
+          changed_when: false
+
+        - name: Verifier les versions initiales des partitions
+          ansible.builtin.assert:
+            that:
+              - "flash_before.stdout is search('(?im)^\\s*Primary Image\\s*:\\s*\\d+\\s+\\S+\\s+' ~ (primary_expected | regex_escape) ~ '\\s*$')"
+              - "flash_before.stdout is search('(?im)^\\s*Secondary Image\\s*:\\s*\\d+\\s+\\S+\\s+' ~ (secondary_expected | regex_escape) ~ '\\s*$')"
+            fail_msg: 'Etat des partitions inattendu : intervention interdite.'
+
+        - name: Verifier la RAM et la version active visibles
+          ansible.builtin.assert:
+            that:
+              - "system_before.stdout is search('Software revision\\s*:\\s*' ~ (primary_expected | regex_escape))"
+              - "system_before.stdout is search('Memory\\s*-\\s*Total\\s*:\\s*[\\d,]+')"
+              - "system_before.stdout is search('Free\\s*:\\s*[\\d,]+')"
+            fail_msg: 'Etat systeme ou RAM non lisible : intervention interdite.'
+
+        - name: Arret de securite avant toute ecriture sur Secondary
+          ansible.builtin.fail:
+            msg: >-
+              CONTROLE LECTURE SEULE TERMINE. Installation volontairement BLOQUEE :
+              capacite flash et methode de transfert vers Secondary non homologuees.
+              Aucune commande de copie ni de redemarrage n'a ete executee.
+      always:
+        - name: Creer le repertoire d'archivage NFS
+          ansible.builtin.file:
+            path: '{{ run_dir }}'
+            state: directory
+            mode: '0700'
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
+
+        - name: Archiver les preuves de controle
+          ansible.builtin.copy:
+            content: >-
+              {{ {
+                'phase': 'SECONDARY_PREFLIGHT',
+                'status': 'BLOCKED_PENDING_VENDOR_VALIDATION',
+                'switch': inventory_hostname,
+                'firmware_target': firmware_target,
+                'firmware_size_bytes': image_file.stat.size | default(none),
+                'firmware_sha256': image_file.stat.checksum | default(none),
+                'system': system_before.stdout | default('NOT_COLLECTED'),
+                'flash': flash_before.stdout | default('NOT_COLLECTED'),
+                'flash_capacity_verified': false,
+                'transfer_executed': false,
+                'reboot_executed': false,
+                'awx_job_id': awx_job_id | default('manual')
+              } | to_nice_json }}
+            dest: '{{ run_dir }}/secondary_preflight.json'
+            mode: '0600'
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
