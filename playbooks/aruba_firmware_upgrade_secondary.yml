@@ -49,10 +49,11 @@
   vars_files:
     - ../vars/aruba_firmware_devices.yml
 
-  vars:
-    ansible_connection: ansible.netcommon.network_cli
-    ansible_network_os: arubanetworks.aos_switch.arubaoss
-    ansible_command_timeout: 120
+vars:
+  ansible_connection: ansible.netcommon.network_cli
+  ansible_network_os: arubanetworks.aos_switch.arubaoss
+  ansible_network_cli_ssh_type: paramiko
+  ansible_command_timeout: 120
 
     firmware_expected: "{{ aruba_firmware_devices[inventory_hostname] }}"
 
