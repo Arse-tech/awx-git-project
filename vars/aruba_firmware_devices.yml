@@ -9,9 +9,9 @@ aruba_firmware_devices:
     default_boot_before: "Primary"
 
   CSE-LAB-B01-ARU-SW-2:
-    primary_before: "WC.16.10.0009"
-    secondary_before: "WC.16.10.0009"
-    running_before: "WC.16.10.0009"
+    primary_before: "WC.16.11.0021"
+    secondary_before: "WC.16.11.0021"
+    running_before: "WC.16.11.0021"
     boot_image_before: "Primary"
     default_boot_before: "Primary"
 
