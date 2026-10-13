@@ -1,1 +1,26 @@
 
+---
+aruba_firmware_devices:
+  CSE-LAB-B01-ARU-SW:
+    primary_before: "WC.16.11.0010"
+    secondary_before: "WC.16.07.0003"
+    running_before: "WC.16.11.0010"
+    boot_image_before: "Primary"
+    default_boot_before: "Primary"
+
+  CSE-LAB-B01-ARU-SW-2:
+    primary_before: "WC.16.10.0009"
+    secondary_before: "WC.16.10.0009"
+    running_before: "WC.16.10.0009"
+    boot_image_before: "Primary"
+    default_boot_before: "Primary"
+
+aruba_firmware_target:
+  version: "WC.16.11.0030"
+  filename: "WC_16_11_0030.swi"
+  size_bytes: 30294326
+  sha256: "4749334ebdb4989c6176643b2daf57514441348778899895dc08d1c1d546e42d"
+  local_path: "/awx-storage/firmwares/aruba/2930F/WC_16_11_0030.swi"
+  tftp_server: "172.16.23.162"
+  tftp_path: "aruba/2930F/WC_16_11_0030.swi"
+
