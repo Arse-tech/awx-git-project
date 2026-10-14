@@ -1,36 +1,18 @@
 ---
-- name: Valider la selection de l'equipement
-  hosts: localhost
-  gather_facts: false
-  tasks:
-    - name: Verifier le parametre target_device
-      ansible.builtin.assert:
-        that:
-          - target_device | default('') | trim | length > 0
-          - target_device | default('') is match('^[A-Za-z0-9_.-]+$')
-          - target_device | default('') in groups['all']
-        fail_msg: "Equipement invalide ou absent de l'inventaire AWX."
-    - name: Verifier le constructeur Aruba
-      ansible.builtin.assert:
-        that:
-          - hostvars[target_device].device_vendor | default('') | lower == 'aruba'
-        fail_msg: "L'equipement selectionne n'est pas Aruba."
-    - name: Ajouter l'equipement au groupe temporaire
-      ansible.builtin.add_host:
-        name: "{{ target_device }}"
-        groups: aruba_selected
-      changed_when: false
-
+# JT01 v2.3 - precheck multi-switch, snapshot partage, connexion SSH initiale
+# Aucun changement sur les switches. Selection unique par Limit du workflow.
 - name: ORANGE LAB RUN - Precheck firmware Aruba AOS-S avec archivage NFS
-  hosts: aruba_selected
+  hosts: all
   gather_facts: false
+  any_errors_fatal: true
   vars:
     ansible_connection: ansible.netcommon.network_cli
     ansible_network_os: arubanetworks.aos_switch.arubaoss
     ansible_command_timeout: 60
     archive_root: /awx-storage/reports/aruba
-    archive_run_id: "{{ tower_job_id | default(awx_job_id | default('manual-' ~ now(utc=true, fmt='%Y%m%dT%H%M%SZ'))) }}"
-    archive_dir: "{{ archive_root }}/{{ inventory_hostname }}/job-{{ archive_run_id }}"
+    workflow_id: "{{ awx_workflow_job_id | default('', true) }}"
+    archive_run_id: "{{ workflow_id }}-job-{{ awx_job_id | default('manual', true) }}"
+    archive_dir: "{{ archive_root }}/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
     precheck_required_commands:
       - show version
       - show system
@@ -50,6 +32,22 @@
       - show loop-protect
       - show boot-history
   tasks:
+    - name: Refuser toute execution sans selection explicite et valider Aruba
+      ansible.builtin.assert:
+        that:
+          - ansible_limit is defined
+          - awx_workflow_job_id is defined
+          - workflow_id | length > 0
+          - (ansible_limit | default('') | trim) is match('^[A-Za-z0-9_.-]+([,:][A-Za-z0-9_.-]+)*$')
+          - (ansible_limit | default('') | regex_findall('[^,:]+') | unique | sort | list) == (ansible_play_hosts_all | sort)
+          - inventory_hostname != 'localhost'
+          - device_vendor | default('') | lower == 'aruba'
+          - ansible_play_hosts_all | length > 0
+        fail_msg: >-
+          Selection Limit absente, hote non Aruba ou selection invalide.
+          Choisir explicitement un ou plusieurs switches dans le Limit du workflow.
+        success_msg: "Cible autorisee : {{ inventory_hostname }}"
+
     - name: Verifier le montage NFS dans le conteneur d'execution
       ansible.builtin.command:
         cmd: mountpoint -q /awx-storage
@@ -198,6 +196,64 @@
         fail_msg: "Une ou plusieurs commandes essentielles sont invalides. Voir les fichiers archives sur NFS."
         success_msg: "Les 6 commandes essentielles ont ete validees."
 
+    - name: Analyser les versions et images de demarrage du precheck
+      ansible.builtin.set_fact:
+        initial_primary: >-
+          {{ required_results.results[2].stdout | regex_findall('(?im)^Primary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+\.\d+)') }}
+        initial_secondary: >-
+          {{ required_results.results[2].stdout | regex_findall('(?im)^Secondary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+\.\d+)') }}
+        initial_running: >-
+          {{ required_results.results[0].stdout | regex_findall('(?m)^\s*(WC\.\d+\.\d+\.\d+)\s*$') }}
+        initial_active_image: >-
+          {{ required_results.results[0].stdout | regex_findall('(?im)^Boot Image:\s*(Primary|Secondary)\s*$') }}
+        initial_default_image: >-
+          {{ required_results.results[2].stdout | regex_findall('(?im)^Default Boot Image\s*:\s*(Primary|Secondary)\s*$') }}
+      no_log: true
+
+    - name: Refuser les etats flash ambigus
+      ansible.builtin.assert:
+        that:
+          - initial_primary | length == 1
+          - initial_secondary | length == 1
+          - initial_running | length == 1
+          - initial_active_image | length == 1
+          - initial_default_image | length == 1
+        fail_msg: "Versions ou images de demarrage ambigues. Arret du lot avant JT02."
+
+    - name: Construire le snapshot JT01 reutilisable par JT02
+      ansible.builtin.set_fact:
+        precheck_snapshot:
+          schema_version: 1
+          stage: jt01_precheck
+          status: passed
+          workflow_id: "{{ workflow_id }}"
+          job_id: "{{ awx_job_id | default('') }}"
+          selected_hosts: "{{ ansible_play_hosts_all | sort }}"
+          hostname: "{{ inventory_hostname }}"
+          ip: "{{ ansible_host | default('') }}"
+          device_vendor: "{{ device_vendor | default('') }}"
+          initial_firmware:
+            primary: "{{ initial_primary[0] }}"
+            secondary: "{{ initial_secondary[0] }}"
+            running: "{{ initial_running[0] }}"
+            boot_image: "{{ initial_active_image[0] }}"
+            default_boot: "{{ initial_default_image[0] }}"
+          raw_show_version: "{{ required_results.results[0].stdout }}"
+          raw_show_flash: "{{ required_results.results[2].stdout }}"
+          running_config: "{{ required_results.results[5].stdout }}"
+          vsf_topology: "{{ optional_results.results[4].stdout | default('') }}"
+      no_log: true
+
+    - name: Enregistrer le snapshot de reference NFS pour la suite du workflow
+      ansible.builtin.copy:
+        content: "{{ precheck_snapshot | to_nice_json }}\n"
+        dest: "{{ archive_dir }}/precheck_snapshot.json"
+        mode: '0600'
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      no_log: true
+
     - name: Afficher le statut des commandes complementaires
       ansible.builtin.debug:
         msg: >-
@@ -216,11 +272,14 @@
       ansible.builtin.debug:
         msg:
           - "Equipement : {{ inventory_hostname }}"
+          - "Selection workflow Limit : {{ ansible_limit | default('ABSENT') }}"
+          - "Nombre d'equipements selectionnes : {{ ansible_play_hosts_all | length }}"
           - "Commandes essentielles : {{ precheck_required_commands | length }}"
           - "Commandes complementaires : {{ precheck_optional_commands | length }}"
           - "Session CLI : {{ archive_dir }}/precheck_cli_session.txt"
           - "Rapport TXT : {{ archive_dir }}/precheck_report.txt"
           - "Rapport PDF : {{ archive_dir }}/precheck_report.pdf"
           - "Resultats JSON : {{ archive_dir }}/precheck_results.json"
+          - "Snapshot JT01 : {{ archive_dir }}/precheck_snapshot.json"
           - "Controle automatique VSF : non effectue"
           - "Aucune modification effectuee sur le switch"
