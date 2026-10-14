@@ -93,3 +93,496 @@
       ansible.builtin.stat:
         path: "{{ preparation_path }}"
       register: jt03_preparation_stat
+
+    - name: Afficher le diagnostic de presence des deux rapports
+      ansible.builtin.debug:
+        msg:
+          - "Switch : {{ inventory_hostname }}"
+          - "Snapshot JT01 : {{ snapshot_path }}"
+          - "Snapshot existe : {{ jt03_snapshot_stat.stat.exists | default(false) | bool }}"
+          - "Snapshot fichier regulier : {{ jt03_snapshot_stat.stat.isreg | default(false) | bool }}"
+          - "Preparation JT02 : {{ preparation_path }}"
+          - "Preparation existe : {{ jt03_preparation_stat.stat.exists | default(false) | bool }}"
+          - "Preparation fichier regulier : {{ jt03_preparation_stat.stat.isreg | default(false) | bool }}"
+
+    - name: Exiger les deux rapports du workflow courant
+      ansible.builtin.assert:
+        that:
+          - jt03_snapshot_stat.stat.exists | default(false) | bool
+          - jt03_snapshot_stat.stat.isreg | default(false) | bool
+          - jt03_preparation_stat.stat.exists | default(false) | bool
+          - jt03_preparation_stat.stat.isreg | default(false) | bool
+        fail_msg: >-
+          Rapport JT01 ou JT02 absent/non regulier pour {{ inventory_hostname }}.
+          Voir les chemins et les valeurs exists/isreg ci-dessus.
+          Aucun SSH, aucun transfert autorise.
+
+    - name: Lire les rapports JT01 et JT02 localement
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ snapshot_path }}"
+        - "{{ preparation_path }}"
+      register: report_contents
+      no_log: true
+
+    - name: Decoder les rapports
+      ansible.builtin.set_fact:
+        precheck_snapshot: "{{ report_contents.results[0].content | b64decode | from_json }}"
+        preparation_report: "{{ report_contents.results[1].content | b64decode | from_json }}"
+      no_log: true
+
+    - name: Verifier la provenance et la liste complete des switches
+      ansible.builtin.assert:
+        that:
+          - precheck_snapshot.schema_version | default(0) | int == 1
+          - precheck_snapshot.stage | default('') == 'jt01_precheck'
+          - precheck_snapshot.status | default('') == 'passed'
+          - precheck_snapshot.workflow_id | default('') | string == workflow_id
+          - precheck_snapshot.hostname | default('') == inventory_hostname
+          - precheck_snapshot.selected_hosts | default([]) | sort == ansible_play_hosts_all | sort
+          - precheck_snapshot.device_vendor | default('') | lower == 'aruba'
+          - preparation_report.stage | default('') == 'jt02_preparation_v23'
+          - preparation_report.status | default('') == 'passed'
+          - preparation_report.workflow_id | default('') | string == workflow_id
+          - preparation_report.hostname | default('') == inventory_hostname
+          - preparation_report.selected_hosts | default([]) | sort == ansible_play_hosts_all | sort
+          - preparation_report.precheck_snapshot_path | default('') == snapshot_path
+          - preparation_report.initial_firmware == precheck_snapshot.initial_firmware
+          - not (preparation_report.transfer_executed | default(true) | bool)
+          - not (preparation_report.reboot_executed | default(true) | bool)
+        fail_msg: "Rapports incoherents ou lot different : progression interdite."
+
+    - name: Valider la reference initiale et la protection Primary
+      ansible.builtin.assert:
+        that:
+          - precheck_snapshot.initial_firmware.primary == aruba_firmware_devices[inventory_hostname].primary_before
+          - precheck_snapshot.initial_firmware.secondary == aruba_firmware_devices[inventory_hostname].secondary_before
+          - precheck_snapshot.initial_firmware.running == aruba_firmware_devices[inventory_hostname].running_before
+          - precheck_snapshot.initial_firmware.boot_image == aruba_firmware_devices[inventory_hostname].boot_image_before
+          - precheck_snapshot.initial_firmware.default_boot == aruba_firmware_devices[inventory_hostname].default_boot_before
+          - precheck_snapshot.initial_firmware.boot_image == 'Primary'
+          - precheck_snapshot.initial_firmware.default_boot == 'Primary'
+          - precheck_snapshot.initial_firmware.running == precheck_snapshot.initial_firmware.primary
+          - precheck_snapshot.initial_firmware.secondary != firmware_target_version
+        fail_msg: "Etat initial inattendu ou Secondary deja a jour. Aucun transfert."
+
+    - name: Refuser le transfert reel depuis une version de depart non validee
+      ansible.builtin.assert:
+        that:
+          - precheck_snapshot.initial_firmware.running in transfer_validated_running_versions
+        fail_msg: >-
+          Migration depuis {{ precheck_snapshot.initial_firmware.running }} non validee.
+          Le transfert reel est refuse pour ce switch et pour tout le lot.
+      when: secondary_transfer_requested | bool
+
+    - name: Verifier l'image cible et son empreinte validees dans JT02
+      ansible.builtin.assert:
+        that:
+          - aruba_firmware_target.version == firmware_target_version
+          - aruba_firmware_target.size_bytes | int == firmware_expected_size
+          - aruba_firmware_target.sha256 == firmware_expected_sha256
+          - preparation_report.firmware_target == firmware_target_version
+          - preparation_report.firmware_size | int == firmware_expected_size
+          - preparation_report.firmware_sha256 == firmware_expected_sha256
+        fail_msg: "Image firmware ou rapport JT02 incoherent."
+
+    - name: Recontroler le SWI disponible dans l'EE
+      ansible.builtin.stat:
+        path: "{{ aruba_firmware_target.local_path }}"
+        checksum_algorithm: sha256
+        get_checksum: true
+      register: firmware_stat
+
+    - name: Refuser une image SWI absente ou modifiee
+      ansible.builtin.assert:
+        that:
+          - firmware_stat.stat.isreg | default(false)
+          - firmware_stat.stat.size | default(0) | int == firmware_expected_size
+          - firmware_stat.stat.checksum | default('') == firmware_expected_sha256
+        fail_msg: "Image SWI EE absente, taille ou SHA256 incorrect."
+
+    - name: Marquer ce switch comme valide en preflight local
+      ansible.builtin.set_fact:
+        secondary_local_preflight_ok: true
+
+    - name: Verifier le fichier effectivement servi par TFTP dans l'EE
+      when: secondary_transfer_requested | bool
+      run_once: true
+      block:
+        - name: Creer un fichier temporaire TFTP
+          ansible.builtin.tempfile:
+            state: file
+            suffix: .swi
+          register: tftp_temp
+
+        - name: Telecharger une fois l'image depuis le serveur TFTP
+          ansible.builtin.command:
+            argv:
+              - curl
+              - --fail
+              - --silent
+              - --show-error
+              - --max-time
+              - '180'
+              - --output
+              - "{{ tftp_temp.path }}"
+              - "tftp://{{ firmware_tftp_server }}/{{ firmware_tftp_path }}"
+          changed_when: false
+
+        - name: Calculer SHA256 et taille du fichier recu par TFTP
+          ansible.builtin.stat:
+            path: "{{ tftp_temp.path }}"
+            checksum_algorithm: sha256
+            get_checksum: true
+          register: tftp_file_stat
+
+        - name: Comparer image TFTP et image cible
+          ansible.builtin.assert:
+            that:
+              - tftp_file_stat.stat.isreg | default(false)
+              - tftp_file_stat.stat.size | default(0) | int == firmware_expected_size
+              - tftp_file_stat.stat.checksum | default('') == firmware_expected_sha256
+            fail_msg: "Firmware TFTP non identique au SHA256 approuve."
+      always:
+        - name: Effacer le fichier temporaire TFTP
+          ansible.builtin.file:
+            path: "{{ tftp_temp.path }}"
+            state: absent
+          when: tftp_temp is defined and tftp_temp.path is defined
+
+    - name: Exiger la reussite locale de TOUS les switches avant toute suite
+      ansible.builtin.assert:
+        that:
+          - >-
+            (ansible_play_hosts_all | map('extract', hostvars, 'secondary_local_preflight_ok')
+             | select('equalto', true) | list | length) == (ansible_play_hosts_all | length)
+        fail_msg: "Au moins un equipement du lot n'a pas reussi le preflight."
+
+    - name: Ecrire un rapport de simulation ou de preflight
+      ansible.builtin.copy:
+        dest: "{{ report_path }}"
+        mode: '0600'
+        content: |
+          {{
+            {
+              'schema_version': 1,
+              'stage': 'jt03_secondary_v037',
+              'status': 'ready_for_live_ssh_validation' if secondary_transfer_requested | bool else 'passed_simulation',
+              'workflow_id': workflow_id,
+              'job_id': awx_job_id | default(''),
+              'hostname': inventory_hostname,
+              'selected_hosts': ansible_play_hosts_all | sort,
+              'precheck_snapshot_path': snapshot_path,
+              'preparation_report_path': preparation_path,
+              'initial_firmware': precheck_snapshot.initial_firmware,
+              'target_firmware': firmware_target_version,
+              'firmware_sha256': firmware_stat.stat.checksum,
+              'secondary_copy_command': secondary_copy_command,
+              'mode': secondary_mode,
+              'approval_awx_verified': false,
+              'tftp_checked_from_ee': secondary_transfer_requested | bool,
+              'tftp_verified_from_switch': false,
+              'ssh_connection_executed': false,
+              'transfer_executed': false,
+              'reboot_executed': false
+            } | to_nice_json
+          }}
+
+    - name: Bilan preflight V03.7
+      ansible.builtin.debug:
+        msg:
+          - "Switch : {{ inventory_hostname }}"
+          - "Workflow : {{ workflow_id }}"
+          - "Selection : {{ ansible_play_hosts_all | sort | join(', ') }}"
+          - "Mode : {{ secondary_mode }}"
+          - "Primary : {{ precheck_snapshot.initial_firmware.primary }}"
+          - "Secondary : {{ precheck_snapshot.initial_firmware.secondary }}"
+          - "Cible : {{ firmware_target_version }}"
+          - "Rapport : {{ report_path }}"
+          - "SSH : aucun en mode simulate ; ecriture / reboot : aucun en mode simulate"
+
+- name: JT03 V03.7.2 - Phase 2 - Validation SSH de tout le lot avant transfert
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  any_errors_fatal: true
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 120
+  tasks:
+    - name: Relire l'etat reel en SSH sur chaque switch (mode transfer seulement)
+      when: secondary_transfer_requested | default(false) | bool
+      block:
+        - name: Verifier globalement les preflights locaux
+          ansible.builtin.assert:
+            that:
+              - >-
+                (ansible_play_hosts_all | map('extract', hostvars, 'secondary_local_preflight_ok')
+                 | select('equalto', true) | list | length) == (ansible_play_hosts_all | length)
+            fail_msg: "Le lot n'est pas integralement valide."
+
+        - name: Lire show version juste avant ecriture
+          ansible.netcommon.cli_command:
+            command: show version
+          register: version_live
+          changed_when: false
+
+        - name: Lire show flash juste avant ecriture
+          ansible.netcommon.cli_command:
+            command: show flash
+          register: flash_live
+          changed_when: false
+
+        - name: Extraire les versions et le mode de boot actuels
+          ansible.builtin.set_fact:
+            primary_live: "{{ flash_live.stdout | regex_findall('(?im)^Primary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+            secondary_live: "{{ flash_live.stdout | regex_findall('(?im)^Secondary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+            running_live: "{{ version_live.stdout | regex_findall('(?m)^\\s*(WC\\.\\d+\\.\\d+\\.\\d+)\\s*$') }}"
+            active_live: "{{ version_live.stdout | regex_findall('(?im)^Boot Image:\\s*(Primary|Secondary)\\s*$') }}"
+            default_live: "{{ flash_live.stdout | regex_findall('(?im)^Default Boot Image\\s*:\\s*(Primary|Secondary)\\s*$') }}"
+
+        - name: Refuser une sortie CLI incomplete ou ambigue
+          ansible.builtin.assert:
+            that:
+              - primary_live | length == 1
+              - secondary_live | length == 1
+              - running_live | length == 1
+              - active_live | length == 1
+              - default_live | length == 1
+            fail_msg: "Impossible de lire sans ambiguite la flash et le boot."
+
+        - name: Confirmer que le switch n'a pas change depuis JT01
+          ansible.builtin.assert:
+            that:
+              - primary_live[0] == precheck_snapshot.initial_firmware.primary
+              - secondary_live[0] == precheck_snapshot.initial_firmware.secondary
+              - running_live[0] == precheck_snapshot.initial_firmware.running
+              - active_live[0] == 'Primary'
+              - default_live[0] == 'Primary'
+              - running_live[0] == primary_live[0]
+              - secondary_live[0] != v037_firmware_target_version
+            fail_msg: >-
+              Etat reel different de JT01 ou Secondary deja a jour.
+              Aucun switch du lot ne doit etre ecrit.
+
+        - name: Marquer le switch comme valide apres relecture SSH
+          ansible.builtin.set_fact:
+            secondary_live_ready: true
+
+        - name: Archiver l'etat verifie avant ecriture
+          ansible.builtin.copy:
+            dest: "{{ v037_report_path }}"
+            mode: '0600'
+            content: |
+              {{
+                {
+                  'schema_version': 1,
+                  'stage': 'jt03_secondary_v037',
+                  'status': 'ready_for_secondary_transfer',
+                  'workflow_id': v037_workflow_id,
+                  'hostname': inventory_hostname,
+                  'selected_hosts': ansible_play_hosts_all | sort,
+                  'initial_firmware': precheck_snapshot.initial_firmware,
+                  'primary_live': primary_live[0],
+                  'secondary_live': secondary_live[0],
+                  'target_firmware': v037_firmware_target_version,
+                  'mode': secondary_mode,
+                  'approval_awx_verified': false,
+                  'ssh_connection_executed': true,
+                  'transfer_executed': false,
+                  'reboot_executed': false
+                } | to_nice_json
+              }}
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
+
+        - name: Barriere globale - tous les switches doivent etre prets
+          ansible.builtin.assert:
+            that:
+              - >-
+                (ansible_play_hosts_all | map('extract', hostvars, 'secondary_live_ready')
+                 | select('equalto', true) | list | length) == (ansible_play_hosts_all | length)
+            fail_msg: "Un switch a echoue aux controles SSH : aucun transfert."
+
+- name: JT03 V03.7.2 - Phase 3 - Ecriture Secondary un switch a la fois
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  serial: 1
+  any_errors_fatal: true
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 120
+  tasks:
+    - name: Transferer uniquement lorsque toutes les barrieres sont franchies
+      when: secondary_transfer_requested | default(false) | bool
+      block:
+        - name: Exiger la validation SSH de TOUS les switches
+          ansible.builtin.assert:
+            that:
+              - secondary_local_preflight_ok | default(false) | bool
+              - secondary_live_ready | default(false) | bool
+              - >-
+                (ansible_play_hosts_all | map('extract', hostvars, 'secondary_live_ready')
+                 | select('equalto', true) | list | length) == (ansible_play_hosts_all | length)
+              - secondary_mode == 'transfer'
+              - secondary_transfer_authorized | default(false) | bool
+              - secondary_flash_risk_accepted | default(false) | bool
+            fail_msg: "Blocage avant ecriture : lot non pret ou autorisations absentes."
+
+        - name: Enregistrer AVANT la commande un etat pouvant etre indetermine
+          ansible.builtin.copy:
+            dest: "{{ v037_report_path }}"
+            mode: '0600'
+            content: |
+              {{
+                {
+                  'schema_version': 1,
+                  'stage': 'jt03_secondary_v037',
+                  'status': 'transfer_about_to_start',
+                  'workflow_id': v037_workflow_id,
+                  'hostname': inventory_hostname,
+                  'selected_hosts': ansible_play_hosts_all | sort,
+                  'target_firmware': v037_firmware_target_version,
+                  'approval_awx_verified': false,
+                  'transfer_completed': false,
+                  'flash_state': 'not_yet_verified',
+                  'reboot_executed': false
+                } | to_nice_json
+              }}
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
+
+        - name: Copier le firmware dans Secondary seulement
+          ansible.netcommon.cli_command:
+            command: "{{ secondary_copy_command }}"
+            prompt:
+              - '(?is)secondary image will be deleted.*Continue\s*\(y/n\)\?'
+            answer:
+              - 'y'
+            check_all: true
+          register: secondary_copy_result
+          vars:
+            ansible_command_timeout: 1200
+          changed_when: true
+          # La confirmation du switch n'a pas encore ete verifiee dans un vrai transfert.
+          # En cas de prompt different, ne PAS relancer a l'aveugle.
+
+        - name: Rejeter toute erreur evidente de transfert
+          ansible.builtin.assert:
+            that:
+              - secondary_copy_result is succeeded
+              - secondary_copy_result.stdout is defined
+              - secondary_copy_result.stdout | regex_search('(?i)(transport error|peer unreachable|error in sending|timed out|invalid input|failed)') is none
+            fail_msg: "La sortie signale un echec. Verifier show flash AVANT toute relance."
+
+        - name: Relire show version apres le transfert
+          ansible.netcommon.cli_command:
+            command: show version
+          register: version_after
+          changed_when: false
+
+        - name: Relire show flash apres le transfert
+          ansible.netcommon.cli_command:
+            command: show flash
+          register: flash_after
+          changed_when: false
+
+        - name: Extraire l'etat flash apres transfert
+          ansible.builtin.set_fact:
+            primary_after: "{{ flash_after.stdout | regex_findall('(?im)^Primary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+            secondary_after: "{{ flash_after.stdout | regex_findall('(?im)^Secondary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+            running_after: "{{ version_after.stdout | regex_findall('(?m)^\\s*(WC\\.\\d+\\.\\d+\\.\\d+)\\s*$') }}"
+            active_after: "{{ version_after.stdout | regex_findall('(?im)^Boot Image:\\s*(Primary|Secondary)\\s*$') }}"
+            default_after: "{{ flash_after.stdout | regex_findall('(?im)^Default Boot Image\\s*:\\s*(Primary|Secondary)\\s*$') }}"
+
+        - name: Confirmer Secondary cible et Primary strictement intacte
+          ansible.builtin.assert:
+            that:
+              - primary_after | length == 1
+              - secondary_after | length == 1
+              - running_after | length == 1
+              - active_after | length == 1
+              - default_after | length == 1
+              - primary_after[0] == precheck_snapshot.initial_firmware.primary
+              - secondary_after[0] == v037_firmware_target_version
+              - running_after[0] == precheck_snapshot.initial_firmware.running
+              - active_after[0] == 'Primary'
+              - default_after[0] == 'Primary'
+            fail_msg: "Post-transfert incorrect. NE PAS REDEMARRER."
+
+        - name: Archiver la verification finale de Secondary
+          ansible.builtin.copy:
+            dest: "{{ v037_report_path }}"
+            mode: '0600'
+            content: |
+              {{
+                {
+                  'schema_version': 1,
+                  'stage': 'jt03_secondary_v037',
+                  'status': 'passed_verified',
+                  'workflow_id': v037_workflow_id,
+                  'job_id': awx_job_id | default(''),
+                  'hostname': inventory_hostname,
+                  'selected_hosts': ansible_play_hosts_all | sort,
+                  'primary_after': primary_after[0],
+                  'secondary_after': secondary_after[0],
+                  'running_after': running_after[0],
+                  'active_after': active_after[0],
+                  'default_after': default_after[0],
+                  'target_firmware': v037_firmware_target_version,
+                  'approval_awx_verified': false,
+                  'transfer_executed': true,
+                  'post_transfer_verified': true,
+                  'reboot_executed': false
+                } | to_nice_json
+              }}
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
+
+        - name: Bilan positif sans redemarrage
+          ansible.builtin.debug:
+            msg:
+              - "Switch : {{ inventory_hostname }}"
+              - "Primary : {{ primary_after[0] }} (inchangée)"
+              - "Secondary : {{ secondary_after[0] }} (cible)"
+              - "Image active : {{ active_after[0] }}"
+              - "Redemarrage : aucun"
+              - "Rapport : {{ v037_report_path }}"
+
+      rescue:
+        - name: Enregistrer un etat incertain apres tentative
+          ansible.builtin.copy:
+            dest: "{{ v037_report_path }}"
+            mode: '0600'
+            content: |
+              {{
+                {
+                  'schema_version': 1,
+                  'stage': 'jt03_secondary_v037',
+                  'status': 'failed_or_indeterminate',
+                  'workflow_id': v037_workflow_id,
+                  'hostname': inventory_hostname,
+                  'selected_hosts': ansible_play_hosts_all | sort,
+                  'failed_task': ansible_failed_task.name | default('unknown'),
+                  'flash_state': 'UNKNOWN_verify_show_flash_before_retry',
+                  'transfer_may_have_started': true,
+                  'approval_awx_verified': false,
+                  'reboot_executed': false
+                } | to_nice_json
+              }}
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
+
+        - name: Arreter le lot en cas de transfert incertain
+          ansible.builtin.fail:
+            msg: >-
+              Echec ou resultat inconnu sur {{ inventory_hostname }}.
+              Ne pas relancer, ne pas redemarrer. Verifier show flash manuellement.
