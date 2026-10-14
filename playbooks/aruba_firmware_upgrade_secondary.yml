@@ -1,49 +1,52 @@
 ---
-# Aruba 2930F — JT03 V03.6 — WORKFLOW MULTI-SWITCH — DRY-RUN UNIQUEMENT
-# - Cibles uniquement via Limit du workflow AWX (1 ou plusieurs equipements)
-# - Reutilise les rapports JT01 v2.3 et JT02 v2.3 du MEME workflow
-# - Execution LOCALE dans l'EE : AUCUNE connexion SSH vers les switches
-# - AUCUN transfert TFTP, AUCUNE ecriture flash, AUCUN changement de boot, AUCUN reboot
-# - Toute tentative d'activer les anciens drapeaux de transfert est REFUSEE
-# - Approval A n'est pas verifie automatiquement par ce playbook
-# - Ce fichier ne doit PAS etre considere comme une version d'upgrade reel
+# Aruba 2930F - JT03 V03.7 - workflow AWX multi-switch
+# Phase 1 : CONTROLES LOCAUX + rapports JT01/JT02 (aucun SSH)
+# Phase 2 : relecture SSH sur TOUS les switches, seulement en mode transfer
+# Phase 3 : transfert Secondary SEQUENTIEL, seulement apres la barriere globale
+# Mode par defaut : simulate (aucune ecriture, aucune connexion SSH).
+# AUCUN reboot, AUCUNE modification du boot ou de Primary.
+# IMPORTANT : Approval A reste une garantie du GRAPHE du workflow.
+# Le playbook NE VERIFIE PAS independamment l'etat de l'approbation AWX.
+# Un transfert reel demande secondary_execution_mode=transfer ET les deux drapeaux true.
+# La compatibilite depuis WC.16.11.0010 (SW-1) N'EST PAS validee pour le transfert reel.
 
-- name: JT03 V03.6 - Simulation du transfert Secondary depuis les rapports du workflow
+- name: JT03 V03.7 - Phase 1 - Barriere de preflight locale sans SSH
   hosts: all
   gather_facts: false
   strategy: linear
   any_errors_fatal: true
-
   vars_files:
     - ../vars/aruba_firmware_devices.yml
-
   vars:
-    # Les modules ansible.builtin travaillent dans l'Execution Environment,
-    # meme si inventory_hostname designe un switch reseau.
     ansible_connection: local
     archive_root: /awx-storage/reports/aruba
     workflow_id: "{{ awx_workflow_job_id | default('', true) | string }}"
     archive_dir: "{{ archive_root }}/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
     snapshot_path: "{{ archive_dir }}/precheck_snapshot.json"
     preparation_path: "{{ archive_dir }}/preparation_v23.json"
-    report_path: "{{ archive_dir }}/secondary_preflight_v036.json"
-    firmware_tftp_server: "172.16.23.162"
-    firmware_tftp_path: "aruba/2930F/WC_16_11_0030.swi"
-    firmware_target_version: "WC.16.11.0030"
+    report_path: "{{ archive_dir }}/secondary_upgrade_v037.json"
+    firmware_target_version: WC.16.11.0030
     firmware_expected_size: 30294326
-    firmware_expected_sha256: "4749334ebdb4989c6176643b2daf57514441348778899895dc08d1c1d546e42d"
-
+    firmware_expected_sha256: 4749334ebdb4989c6176643b2daf57514441348778899895dc08d1c1d546e42d
+    firmware_tftp_server: 172.16.23.162
+    firmware_tftp_path: aruba/2930F/WC_16_11_0030.swi
+    # Garde-fou du laboratoire : seul le point de depart .0021 est admis en mode reel.
+    # Une autre version exige une validation explicite du chemin de migration Aruba.
+    transfer_validated_running_versions:
+      - WC.16.11.0021
   tasks:
-    - name: Interdire toute autorisation de transfert dans cette version de simulation
-      ansible.builtin.assert:
-        that:
-          - not (secondary_transfer_authorized | default(false) | bool)
-          - not (secondary_flash_risk_accepted | default(false) | bool)
-        fail_msg: >-
-          JT03 V03.6 est un DRY-RUN strict. Les autorisations de transfert
-          doivent etre absentes ou false. Aucune ecriture flash possible.
+    - name: Definir le mode de traitement
+      ansible.builtin.set_fact:
+        secondary_mode: "{{ secondary_execution_mode | default('simulate') | string | lower }}"
+        secondary_transfer_requested: "{{ (secondary_execution_mode | default('simulate') | string | lower) == 'transfer' }}"
+        secondary_copy_command: >-
+          copy tftp flash {{ firmware_tftp_server }} {{ firmware_tftp_path }} secondary
+        # Les vars d'un play ne sont PAS propagees aux plays suivants.
+        v037_workflow_id: "{{ workflow_id }}"
+        v037_report_path: "{{ report_path }}"
+        v037_firmware_target_version: "{{ firmware_target_version }}"
 
-    - name: Verifier la selection unique du workflow et la famille Aruba
+    - name: Verifier workflow, Limit et autorisations explicites
       ansible.builtin.assert:
         that:
           - awx_workflow_job_id is defined
@@ -55,166 +58,39 @@
           - inventory_hostname != 'localhost'
           - device_vendor | default('') | lower == 'aruba'
           - inventory_hostname in aruba_firmware_devices
+          - secondary_mode in ['simulate', 'transfer']
+          - (secondary_transfer_authorized | default(false) | bool) == (secondary_flash_risk_accepted | default(false) | bool)
+          - secondary_transfer_requested | bool or not (secondary_transfer_authorized | default(false) | bool)
+          - not (secondary_transfer_requested | bool) or (secondary_transfer_authorized | default(false) | bool)
+          - not (secondary_transfer_requested | bool) or (secondary_flash_risk_accepted | default(false) | bool)
         fail_msg: >-
-          Cible absente, non Aruba, non referencee ou selection Limit invalide.
-          Utiliser uniquement le Limit du workflow, avec un ou plusieurs switches autorises.
+          Refus : contexte AWX/Limit, hote Aruba ou mode/autorisation non conforme.
+          Le mode transfer exige les DEUX autorisations true.
+          Le mode simulate exige les DEUX autorisations false.
 
-    - name: Verifier le stockage NFS monte dans l'EE
+    - name: Tester le blocage global sur un hote sans risque - optionnel
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname != (jt03_test_failure_host | default(''))
+        fail_msg: >-
+          ECHEC DE TEST INTENTIONNEL : {{ inventory_hostname }}.
+          Aucun transfert ne peut avoir demarre : phase locale, avant toute connexion SSH.
+      when:
+        - not (secondary_transfer_requested | bool)
+        - jt03_test_failure_host | default('') | length > 0
+
+    - name: Verifier le montage du stockage NFS
       ansible.builtin.command:
         cmd: mountpoint -q /awx-storage
       changed_when: false
 
-    - name: Rechercher les rapports de JT01 et JT02 pour ce workflow
+    - name: Verifier les deux rapports du meme workflow
       ansible.builtin.stat:
         path: "{{ item }}"
       loop:
         - "{{ snapshot_path }}"
         - "{{ preparation_path }}"
-      register: source_files
+      register: report_files
 
-    - name: Exiger les deux rapports du workflow courant
+    - name: Refuser un rapport absent ou non regulier
       ansible.builtin.assert:
-        that:
-          - source_files.results | length == 2
-          - source_files.results | selectattr('stat.isreg', 'defined') | selectattr('stat.isreg') | list | length == 2
-        fail_msg: >-
-          Rapport JT01 ou JT02 introuvable pour cet equipement et ce workflow.
-          Interdiction de reutiliser les rapports d'une ancienne execution.
-
-    - name: Charger les rapports JT01 et JT02 sans connexion SSH
-      ansible.builtin.slurp:
-        src: "{{ item }}"
-      loop:
-        - "{{ snapshot_path }}"
-        - "{{ preparation_path }}"
-      register: source_blobs
-      no_log: true
-
-    - name: Decoder les informations de reference
-      ansible.builtin.set_fact:
-        precheck_snapshot: "{{ source_blobs.results[0].content | b64decode | from_json }}"
-        preparation_report: "{{ source_blobs.results[1].content | b64decode | from_json }}"
-      no_log: true
-
-    - name: Verifier la provenance des rapports et la selection identique
-      ansible.builtin.assert:
-        that:
-          - precheck_snapshot.schema_version | default(0) | int == 1
-          - precheck_snapshot.stage | default('') == 'jt01_precheck'
-          - precheck_snapshot.status | default('') == 'passed'
-          - precheck_snapshot.workflow_id | default('') | string == workflow_id
-          - precheck_snapshot.hostname | default('') == inventory_hostname
-          - precheck_snapshot.selected_hosts | default([]) | sort == ansible_play_hosts_all | sort
-          - precheck_snapshot.device_vendor | default('') | lower == 'aruba'
-          - preparation_report.stage | default('') == 'jt02_preparation_v23'
-          - preparation_report.status | default('') == 'passed'
-          - preparation_report.workflow_id | default('') | string == workflow_id
-          - preparation_report.hostname | default('') == inventory_hostname
-          - preparation_report.selected_hosts | default([]) | sort == ansible_play_hosts_all | sort
-          - preparation_report.precheck_snapshot_path | default('') == snapshot_path
-          - preparation_report.initial_firmware == precheck_snapshot.initial_firmware
-          - not (preparation_report.transfer_executed | default(true) | bool)
-          - not (preparation_report.reboot_executed | default(true) | bool)
-        fail_msg: >-
-          Rapport incoherent, incomplet ou provenant d'un autre workflow/lot.
-          Simulation Secondary arretee.
-
-    - name: Verifier les versions de reference et la protection de Primary
-      ansible.builtin.assert:
-        that:
-          - precheck_snapshot.initial_firmware.primary is defined
-          - precheck_snapshot.initial_firmware.secondary is defined
-          - precheck_snapshot.initial_firmware.running is defined
-          - precheck_snapshot.initial_firmware.boot_image is defined
-          - precheck_snapshot.initial_firmware.default_boot is defined
-          - precheck_snapshot.initial_firmware.primary == aruba_firmware_devices[inventory_hostname].primary_before
-          - precheck_snapshot.initial_firmware.secondary == aruba_firmware_devices[inventory_hostname].secondary_before
-          - precheck_snapshot.initial_firmware.running == aruba_firmware_devices[inventory_hostname].running_before
-          - precheck_snapshot.initial_firmware.boot_image == aruba_firmware_devices[inventory_hostname].boot_image_before
-          - precheck_snapshot.initial_firmware.default_boot == aruba_firmware_devices[inventory_hostname].default_boot_before
-          - precheck_snapshot.initial_firmware.boot_image == 'Primary'
-          - precheck_snapshot.initial_firmware.default_boot == 'Primary'
-          - precheck_snapshot.initial_firmware.running == precheck_snapshot.initial_firmware.primary
-        fail_msg: >-
-          Etat initial incompatible avec la reference, ou Primary n'est pas
-          l'image active/par defaut. Aucune operation envisageable.
-
-    - name: Verifier que JT02 a valide l'image firmware cible
-      ansible.builtin.assert:
-        that:
-          - aruba_firmware_target.version == firmware_target_version
-          - aruba_firmware_target.size_bytes | int == firmware_expected_size
-          - aruba_firmware_target.sha256 == firmware_expected_sha256
-          - preparation_report.firmware_target == firmware_target_version
-          - preparation_report.firmware_size | int == firmware_expected_size
-          - preparation_report.firmware_sha256 == firmware_expected_sha256
-        fail_msg: >-
-          Le firmware prepare par JT02 ne correspond pas a l'image cible connue.
-
-    - name: Recontroler le firmware accessible dans l'EE sans SSH
-      ansible.builtin.stat:
-        path: "{{ aruba_firmware_target.local_path }}"
-        checksum_algorithm: sha256
-        get_checksum: true
-      register: firmware_stat
-
-    - name: Refuser tout firmware absent ou modifie
-      ansible.builtin.assert:
-        that:
-          - firmware_stat.stat.isreg | default(false)
-          - firmware_stat.stat.size | default(0) | int == firmware_expected_size
-          - firmware_stat.stat.checksum | default('') == firmware_expected_sha256
-        fail_msg: "Image SWI absente ou differente dans l'EE. Aucun transfert."
-
-    - name: Preparer la commande prevue SANS l'executer
-      ansible.builtin.set_fact:
-        secondary_command_preview: >-
-          copy tftp flash {{ firmware_tftp_server }} {{ firmware_tftp_path }} secondary
-
-    - name: Ecrire le rapport de simulation Secondary sur NFS
-      ansible.builtin.copy:
-        dest: "{{ report_path }}"
-        mode: '0600'
-        content: |
-          {{
-            {
-              'schema_version': 1,
-              'stage': 'jt03_secondary_preflight_v036',
-              'status': 'passed_non_destructive',
-              'workflow_id': workflow_id,
-              'job_id': awx_job_id | default(''),
-              'hostname': inventory_hostname,
-              'selected_hosts': ansible_play_hosts_all | sort,
-              'precheck_snapshot_path': snapshot_path,
-              'preparation_report_path': preparation_path,
-              'initial_firmware': precheck_snapshot.initial_firmware,
-              'target_version': firmware_target_version,
-              'firmware_sha256': firmware_stat.stat.checksum,
-              'firmware_size': firmware_stat.stat.size,
-              'secondary_command_preview': secondary_command_preview,
-              'secondary_already_target': precheck_snapshot.initial_firmware.secondary == firmware_target_version,
-              'approval_awx_verified': false,
-              'ssh_connection_executed': false,
-              'tftp_verified_from_switch': false,
-              'transfer_requested': false,
-              'transfer_executed': false,
-              'flash_written': false,
-              'reboot_executed': false
-            } | to_nice_json
-          }}
-
-    - name: Afficher le resultat JT03 V03.6
-      ansible.builtin.debug:
-        msg:
-          - "Switch : {{ inventory_hostname }}"
-          - "Workflow : {{ workflow_id }}"
-          - "Selection : {{ ansible_play_hosts_all | sort | join(', ') }}"
-          - "Primary initiale : {{ precheck_snapshot.initial_firmware.primary }}"
-          - "Secondary initiale : {{ precheck_snapshot.initial_firmware.secondary }}"
-          - "Image active : {{ precheck_snapshot.initial_firmware.boot_image }}"
-          - "Firmware cible : {{ firmware_target_version }}"
-          - "Commande PREPAREE NON EXECUTEE : {{ secondary_command_preview }}"
-          - "SSH vers switch : aucune"
-          - "Transfert / ecriture flash / redemarrage : aucun"
-          - "Approbation AWX non verifiee automatiquement"
-          - "Rapport : {{ report_path }}"
