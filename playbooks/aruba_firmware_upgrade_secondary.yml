@@ -1,10 +1,11 @@
 ---
 # Aruba Firmware - 03 Upgrade Secondary
-# Version V03.5 - Multi-switch / TRANSFERT SECONDARY AVEC DOUBLE AUTORISATION
+# Version V03.5.1 - Multi-switch / TRANSFERT SECONDARY AVEC DOUBLE AUTORISATION
 # Transfert Secondary uniquement si deux autorisations explicites sont vraies.
 # AUCUN redemarrage ni changement de boot.
 # IMPORTANT : Approval A AWX non verifie automatiquement.
 # Approval A n'est PAS verifie automatiquement par ce playbook.
+# Le prompt de confirmation doit etre valide sur le firmware reel avant autorisation.
 
 - name: Valider la cible AWX
   hosts: localhost
@@ -30,9 +31,9 @@
           - "Switch : {{ target_device }}"
           - "IP : {{ hostvars[target_device].ansible_host | default('non renseignee') }}"
           - "Firmware cible : {{ aruba_firmware_target.version }}"
-          - "Mode : V03.5 - transfert conditionnel"
+          - "Mode : V03.5.1 - transfert conditionnel"
 
-- name: Precontrole et transfert firmware Secondary V03.5
+- name: Precontrole et transfert firmware Secondary V03.5.1
   hosts: "{{ target_device }}"
   gather_facts: false
   vars_files:
@@ -56,6 +57,8 @@
         that:
           - target_device is defined
           - inventory_hostname == target_device
+          - target_device | default('') is match('^[A-Za-z0-9_.-]+$')
+          - hostvars[inventory_hostname].device_vendor | default('') | lower == 'aruba'
           - ansible_play_hosts_all | length == 1
           - inventory_hostname in aruba_firmware_devices
           - firmware_expected.primary_before is defined
@@ -230,12 +233,12 @@
 
     - name: Enregistrer le rapport avant transfert
       ansible.builtin.copy:
-        dest: "{{ report_directory }}/secondary_transfer_v035.json"
+        dest: "{{ report_directory }}/secondary_transfer_v0351.json"
         mode: "0600"
         content: |
           {{
             {
-              "stage": "secondary_transfer_v035",
+              "stage": "secondary_transfer_v0351",
               "target_device": inventory_hostname,
               "target_ip": ansible_host | default(""),
               "workflow_job_id": awx_workflow_job_id | default("manual", true),
@@ -257,7 +260,7 @@
       ansible.netcommon.cli_command:
         command: "{{ firmware_secondary_command_preview }}"
         prompt:
-          - '(?i)Continue \(y/n\)\?'
+          - '(?is)secondary image will be deleted.*Continue\s*\(y/n\)\?'
         answer:
           - 'y'
         check_all: true
@@ -265,7 +268,8 @@
       vars:
         ansible_command_timeout: 1200
       when: transfer_requested | bool
-      no_log: true
+      # Conserver les diagnostics de la commande; ne pas inclure de secret dans sa sortie.
+      no_log: false
 
     - name: Verifier la sortie de transfert avant controle flash
       ansible.builtin.assert:
@@ -322,12 +326,12 @@
 
     - name: Enregistrer le rapport final de transfert
       ansible.builtin.copy:
-        dest: "{{ report_directory }}/secondary_transfer_v035.json"
+        dest: "{{ report_directory }}/secondary_transfer_v0351.json"
         mode: "0600"
         content: |
           {{
             {
-              "stage": "secondary_transfer_v035",
+              "stage": "secondary_transfer_v0351",
               "target_device": inventory_hostname,
               "target_ip": ansible_host | default(""),
               "workflow_job_id": awx_workflow_job_id | default("manual", true),
@@ -347,7 +351,7 @@
       delegate_to: localhost
       when: transfer_requested | bool
 
-    - name: Afficher le bilan V03.5
+    - name: Afficher le bilan V03.5.1
       ansible.builtin.debug:
         msg:
           - "Switch : {{ inventory_hostname }}"
@@ -357,4 +361,4 @@
           - "Transfert demande : {{ transfer_requested | bool }}"
           - "Transfert verifie : {{ (transfer_requested | bool) and (secondary_after | default([]) | length == 1) }}"
           - "Aucun redemarrage. Approbation AWX non verifiee automatiquement."
-          - "Rapport : {{ report_directory }}/secondary_transfer_v035.json"
+          - "Rapport : {{ report_directory }}/secondary_transfer_v0351.json"
