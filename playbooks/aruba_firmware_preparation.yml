@@ -1,199 +1,185 @@
 ---
-- name: Valider la selection de l'equipement Aruba
-  hosts: localhost
+# JT02 v2.3 - Preparation firmware Aruba 2930F - SANS SSH
+# Reutilise obligatoirement le snapshot JT01 du MEME workflow AWX.
+# Pas de connexion reseau aux switches, pas de transfert TFTP, pas de flash, pas de reboot.
+- name: Preparation firmware Aruba depuis snapshot JT01 (sans SSH)
+  hosts: all
   gather_facts: false
+  any_errors_fatal: true
+  vars:
+    ansible_connection: local
+    archive_root: /awx-storage/reports/aruba
+    workflow_id: "{{ awx_workflow_job_id | default('', true) }}"
+    archive_dir: "{{ archive_root }}/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
+    snapshot_path: "{{ archive_dir }}/precheck_snapshot.json"
+    firmware_target_version: 'WC.16.11.0030'
+    firmware_file: /awx-storage/firmwares/aruba/2930F/WC_16_11_0030.swi
+    firmware_size_expected: 30294326
+    firmware_sha256_expected: '4749334ebdb4989c6176643b2daf57514441348778899895dc08d1c1d546e42d'
   tasks:
-    - name: Valider le parametre Survey et l'inventaire
+    - name: Verifier le contexte du workflow et les equipements selectionnes
       ansible.builtin.assert:
         that:
-          - target_device | default('') | trim | length > 0
-          - target_device | default('') is match('^[A-Za-z0-9_.-]+$')
-          - target_device | default('') in groups['all']
-          - hostvars[target_device].device_vendor | default('') | lower == 'aruba'
-        fail_msg: "Selection invalide ou equipement non Aruba dans l'inventaire AWX."
-    - name: Creer le groupe temporaire
-      ansible.builtin.add_host:
-        name: "{{ target_device }}"
-        groups: aruba_preparation_selected
-      changed_when: false
+          - awx_workflow_job_id is defined
+          - workflow_id | length > 0
+          - ansible_limit is defined
+          - (ansible_limit | default('') | trim) is match('^[A-Za-z0-9_.-]+([,:][A-Za-z0-9_.-]+)*$')
+          - (ansible_limit | default('') | regex_findall('[^,:]+') | unique | sort | list) == (ansible_play_hosts_all | sort)
+          - device_vendor | default('') | lower == 'aruba'
+        fail_msg: >-
+          Selection non transmise par le workflow, equipement inconnu,
+          ou hote non Aruba. Aucun transfert possible.
 
-- name: Phase 2 - Preparation firmware Aruba AOS-S (lecture seule)
-  hosts: aruba_preparation_selected
-  gather_facts: false
-  vars:
-    ansible_connection: ansible.netcommon.network_cli
-    ansible_network_os: arubanetworks.aos_switch.arubaoss
-    ansible_command_timeout: 60
-    firmware_version_target: 'WC.16.11.0030'
-    firmware_file: /awx-storage/firmwares/aruba/2930F/WC_16_11_0030.swi
-    firmware_sha256_expected: '4749334ebdb4989c6176643b2daf57514441348778899895dc08d1c1d546e42d'
-    archive_run_id: "{{ tower_job_id | default(awx_job_id | default('manual-' ~ now(utc=true, fmt='%Y%m%dT%H%M%SZ'))) }}"
-    archive_dir: "/awx-storage/reports/aruba/{{ inventory_hostname }}/preparation-job-{{ archive_run_id }}"
-    preparation_commands:
-      - show version
-      - show system
-      - show flash
-      - show running-config
-      - show vsf topology
-      - show interfaces brief
-      - show vlan
-  tasks:
-    - name: Verifier le montage NFS dans l'EE
+    - name: Verifier le montage du stockage partage
       ansible.builtin.command:
         cmd: mountpoint -q /awx-storage
-      delegate_to: localhost
-      vars:
-        ansible_connection: local
       changed_when: false
 
-    - name: Verifier la presence et la lisibilite du firmware
+    - name: Verifier la presence du snapshot JT01 pour CE workflow
+      ansible.builtin.stat:
+        path: "{{ snapshot_path }}"
+      register: snapshot_stat
+
+    - name: Refuser toute absence de snapshot
+      ansible.builtin.assert:
+        that:
+          - snapshot_stat.stat.exists | default(false)
+          - snapshot_stat.stat.isreg | default(false)
+        fail_msg: "Snapshot JT01 du workflow courant introuvable. Preparation interdite."
+
+    - name: Lire le snapshot precheck (stockage local de l'EE)
+      ansible.builtin.slurp:
+        src: "{{ snapshot_path }}"
+      register: snapshot_blob
+      no_log: true
+
+    - name: Decoder l'etat JT01
+      ansible.builtin.set_fact:
+        precheck_snapshot: "{{ snapshot_blob.content | b64decode | from_json }}"
+      no_log: true
+
+    - name: Verifier la provenance et la selection du snapshot
+      ansible.builtin.assert:
+        that:
+          - precheck_snapshot.schema_version | default(0) | int == 1
+          - precheck_snapshot.stage | default('') == 'jt01_precheck'
+          - precheck_snapshot.status | default('') == 'passed'
+          - precheck_snapshot.workflow_id | string == workflow_id | string
+          - precheck_snapshot.hostname == inventory_hostname
+          - precheck_snapshot.selected_hosts | sort == ansible_play_hosts_all | sort
+          - precheck_snapshot.device_vendor | lower == 'aruba'
+          - precheck_snapshot.initial_firmware.primary is defined
+          - precheck_snapshot.initial_firmware.secondary is defined
+          - precheck_snapshot.initial_firmware.running is defined
+        fail_msg: >-
+          Snapshot JT01 absent, corrompu, issu d'un autre workflow
+          ou ne correspondant pas aux equipements selectionnes.
+
+    - name: Verifier l'image SWI accessible depuis l'EE
       ansible.builtin.stat:
         path: "{{ firmware_file }}"
         checksum_algorithm: sha256
         get_checksum: true
       register: firmware_stat
-      delegate_to: localhost
-      vars:
-        ansible_connection: local
-      changed_when: false
 
-    - name: Verifier l'empreinte et le type du fichier
+    - name: Controler SHA256, taille et version cible
       ansible.builtin.assert:
         that:
           - firmware_stat.stat.exists | default(false)
           - firmware_stat.stat.isreg | default(false)
           - firmware_stat.stat.readable | default(false)
+          - firmware_stat.stat.size | default(0) | int == firmware_size_expected | int
           - firmware_stat.stat.checksum | default('') == firmware_sha256_expected
-        fail_msg: "Firmware absent, illisible ou SHA-256 incorrect dans l'EE AWX."
-        success_msg: "Firmware present et empreinte SHA-256 conforme."
+        fail_msg: "Image SWI absente ou empreinte/taille incorrecte. Preparation arretee."
 
-    - name: Creer le repertoire NFS du job
-      ansible.builtin.file:
-        path: "{{ archive_dir }}"
-        state: directory
-        mode: '0700'
-      delegate_to: localhost
-      vars:
-        ansible_connection: local
-
-    - name: Collecter les informations du switch sans modification
-      ansible.netcommon.cli_command:
-        command: "{{ item }}"
-      loop: "{{ preparation_commands }}"
-      loop_control:
-        label: "{{ item }}"
-      register: preparation_cli
-      failed_when: false
-      no_log: true
-
-    - name: Construire les resultats et evaluer la collecte
-      ansible.builtin.set_fact:
-        preparation_records: >-
-          {{ preparation_cli.results | map('combine', {'_collected': true}) | list }}
-        preparation_invalid: >-
-          {{ (preparation_cli.results | selectattr('failed', 'defined') | selectattr('failed') | list | length > 0)
-             or (preparation_cli.results | selectattr('stdout', 'undefined') | list | length > 0)
-             or (preparation_cli.results | selectattr('stdout', 'equalto', '') | list | length > 0)
-             or (preparation_cli.results | map(attribute='stdout') | select('search', '(?i)Invalid input|Invalid command|Unknown command') | list | length > 0) }}
-      no_log: true
-
-    - name: Archiver les sorties CLI et les metadonnees JSON
+    - name: Archiver la sauvegarde initiale de configuration depuis JT01
       ansible.builtin.copy:
-        content: >-
-          {{ {'hostname': inventory_hostname,
-              'ip': ansible_host | default(''),
-              'awx_job': archive_run_id,
-              'target_version': firmware_version_target,
-              'firmware_file': firmware_file,
-              'firmware_sha256': firmware_sha256_expected,
-              'commands': preparation_commands,
-              'results': preparation_cli.results | map(attribute='stdout') | list}
-             | to_nice_json }}
-        dest: "{{ archive_dir }}/firmware_inventory.json"
-        mode: '0600'
-      delegate_to: localhost
-      vars:
-        ansible_connection: local
-      no_log: true
-
-    - name: Archiver la configuration courante (capture non restauree)
-      ansible.builtin.copy:
-        content: "{{ preparation_cli.results[3].stdout | default('') }}\n"
+        content: "{{ precheck_snapshot.running_config }}\n"
         dest: "{{ archive_dir }}/running_config_backup.txt"
         mode: '0600'
-      delegate_to: localhost
-      vars:
-        ansible_connection: local
       no_log: true
 
-    - name: Archiver les informations VSF
+    - name: Archiver la topologie VSF capturee dans JT01
       ansible.builtin.copy:
-        content: "{{ preparation_cli.results[4].stdout | default('') }}\n"
+        content: "{{ precheck_snapshot.vsf_topology | default('') }}\n"
         dest: "{{ archive_dir }}/vsf_diagnostics.txt"
         mode: '0600'
-      delegate_to: localhost
-      vars:
-        ansible_connection: local
       no_log: true
 
-    - name: Archiver le plan de retour arriere documentaire
+    - name: Archiver le plan de retour arriere sans action sur le switch
       ansible.builtin.copy:
-        content: |-
-          PLAN DE RETOUR ARRIERE - A VALIDER MANUELLEMENT
-          Equipement : {{ inventory_hostname }}
-          Firmware cible : {{ firmware_version_target }}
-          Strategie : installation Secondary, validation, puis installation Primary.
-          Avant validation Secondary : conserver Primary WC.16.11.0010 intacte.
-          En cas d'incident apres demarrage sur Secondary :
-          - appliquer la procedure constructeur approuvee pour redemarrer sur Primary ;
-          - confirmer la compatibilite configuration / Boot ROM / version precedente ;
-          - controler la connectivite et les services ;
-          - documenter l'incident et ne pas ecraser Primary.
-          ATTENTION : aucune commande de restauration ou de redemarrage n'est executee ici.
-          Validation documentaire et fenetre de maintenance obligatoires.
         dest: "{{ archive_dir }}/rollback_plan.txt"
         mode: '0600'
-      delegate_to: localhost
-      vars:
-        ansible_connection: local
-
-    - name: Archiver le rapport de preparation
-      ansible.builtin.copy:
         content: |-
-          PHASE 2 - PREPARATION FIRMWARE ARUBA
+          PLAN DE RETOUR ARRIERE - VALIDATION HUMAINE OBLIGATOIRE
           Equipement : {{ inventory_hostname }}
-          IP : {{ ansible_host | default('non definie') }}
-          Job AWX : {{ archive_run_id }}
-          Version cible : {{ firmware_version_target }}
-          Fichier : {{ firmware_file }}
-          SHA-256 : {{ firmware_sha256_expected }}
-          Controle SHA-256 : OK
-          Collecte CLI : {{ 'ECHEC' if preparation_invalid | bool else 'OK' }}
-          VSF : Commander prevu pour extension future ; collecte documentaire uniquement
-          Strategie : SECONDARY puis validation puis PRIMARY
-          Compatibilite et prerequis constructeur : A VALIDER
-          Retour arriere : A VALIDER
-          Autorisation de mise a jour : NON
-          Modification du switch : AUCUNE
+          Workflow AWX : {{ workflow_id }}
+          Primary initiale : {{ precheck_snapshot.initial_firmware.primary }}
+          Secondary initiale : {{ precheck_snapshot.initial_firmware.secondary }}
+          Firmware cible : {{ firmware_target_version }}
+          Ordre : ecriture Secondary, boot Secondary, validation, ecriture Primary, boot Primary.
+          Avant ecriture Primary : conserver l'image Primary initiale comme repli.
+          Apres remplacement de Primary : ancien firmware non garanti en flash.
+          Toute bascule de boot ou restauration exige une approbation distincte.
+          Compatibilite firmware/Boot ROM/VSF : a valider selon le modele.
+          AUCUNE COMMANDE executee par JT02 sur le switch.
+
+    - name: Enregistrer la preparation lisible au format TXT
+      ansible.builtin.copy:
         dest: "{{ archive_dir }}/preparation_report.txt"
         mode: '0600'
-      delegate_to: localhost
-      vars:
-        ansible_connection: local
+        content: |-
+          PREPARATION FIRMWARE - JT02 SANS SSH
+          Switch : {{ inventory_hostname }}
+          Workflow : {{ workflow_id }}
+          Selection : {{ ansible_play_hosts_all | sort | join(', ') }}
+          Primary initiale : {{ precheck_snapshot.initial_firmware.primary }}
+          Secondary initiale : {{ precheck_snapshot.initial_firmware.secondary }}
+          Firmware cible : {{ firmware_target_version }}
+          Firmware dans EE : {{ firmware_file }}
+          SHA256 controle : {{ firmware_sha256_expected }}
+          Verification TFTP depuis switch : non effectuee
+          Compatibilite firmware constructeur : a valider
+          Autorisation AWX : non verifiee
+          Connexion SSH JT02 : aucune
+          Flash / transfert / reboot : aucune operation
 
-    - name: Valider la collecte indispensable
-      ansible.builtin.assert:
-        that:
-          - not (preparation_invalid | bool)
-        fail_msg: "Collecte incomplete : consulter les archives NFS."
-        success_msg: "Preparation technique collectee ; mise a jour NON autorisee."
+    - name: Enregistrer le rapport JSON de preparation
+      ansible.builtin.copy:
+        dest: "{{ archive_dir }}/preparation_v23.json"
+        mode: '0600'
+        content: |
+          {{
+            {
+              "stage": "jt02_preparation_v23",
+              "status": "passed",
+              "workflow_id": workflow_id,
+              "job_id": awx_job_id | default(""),
+              "hostname": inventory_hostname,
+              "selected_hosts": ansible_play_hosts_all | sort,
+              "initial_firmware": precheck_snapshot.initial_firmware,
+              "firmware_target": firmware_target_version,
+              "firmware_size": firmware_stat.stat.size,
+              "firmware_sha256": firmware_stat.stat.checksum,
+              "precheck_snapshot_path": snapshot_path,
+              "tftp_verified_from_switch": false,
+              "approval_awx_verified": false,
+              "transfer_executed": false,
+              "reboot_executed": false,
+              "ssh_connection_executed": false
+            } | to_nice_json
+          }}
 
-    - name: Afficher le resume AWX
+    - name: Afficher le bilan de preparation sans SSH
       ansible.builtin.debug:
         msg:
-          - "Equipement : {{ inventory_hostname }}"
-          - "Firmware cible : {{ firmware_version_target }}"
-          - "SHA-256 : conforme"
-          - "Archive : {{ archive_dir }}"
-          - "Etat : PREPARATION TECHNIQUE OK - VALIDATIONS MANUELLES REQUISES"
-          - "Aucun transfert vers le switch, aucune modification, aucun redemarrage"
+          - "Switch : {{ inventory_hostname }}"
+          - "Workflow : {{ workflow_id }}"
+          - "Selection : {{ ansible_play_hosts_all | sort | join(', ') }}"
+          - "Primary initiale : {{ precheck_snapshot.initial_firmware.primary }}"
+          - "Secondary initiale : {{ precheck_snapshot.initial_firmware.secondary }}"
+          - "Firmware cible : {{ firmware_target_version }}"
+          - "SHA256 EE : conforme"
+          - "Connexion SSH JT02 : aucune"
+          - "Rapport : {{ archive_dir }}/preparation_v23.json"
+          - "Aucun transfert, flash ou reboot"
