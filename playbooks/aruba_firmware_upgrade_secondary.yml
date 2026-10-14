@@ -1,5 +1,5 @@
 ---
-# Aruba 2930F - JT03 V03.7 - workflow AWX multi-switch
+# Aruba 2930F - JT03 V03.7.1 - workflow AWX multi-switch
 # Phase 1 : CONTROLES LOCAUX + rapports JT01/JT02 (aucun SSH)
 # Phase 2 : relecture SSH sur TOUS les switches, seulement en mode transfer
 # Phase 3 : transfert Secondary SEQUENTIEL, seulement apres la barriere globale
@@ -10,7 +10,7 @@
 # Un transfert reel demande secondary_execution_mode=transfer ET les deux drapeaux true.
 # La compatibilite depuis WC.16.11.0010 (SW-1) N'EST PAS validee pour le transfert reel.
 
-- name: JT03 V03.7 - Phase 1 - Barriere de preflight locale sans SSH
+- name: JT03 V03.7.1 - Phase 1 - Barriere de preflight locale sans SSH
   hosts: all
   gather_facts: false
   strategy: linear
@@ -92,5 +92,5 @@
         - "{{ preparation_path }}"
       register: report_files
 
-    - name: Refuser un rapport absent ou non regulier
-      ansible.builtin.assert:
+    - name: Verifier que les deux chemins ont ete controles
+      ansible.builtin.fail:
