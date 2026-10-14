@@ -1,7 +1,9 @@
 ---
 # Aruba Firmware - 03 Upgrade Secondary
-# Version V03.4 - Multi-switch / PREFLIGHT ET PREPARATION UNIQUEMENT
-# AUCUN transfert TFTP, AUCUNE ecriture flash, AUCUN redemarrage.
+# Version V03.5 - Multi-switch / TRANSFERT SECONDARY AVEC DOUBLE AUTORISATION
+# Transfert Secondary uniquement si deux autorisations explicites sont vraies.
+# AUCUN redemarrage ni changement de boot.
+# IMPORTANT : Approval A AWX non verifie automatiquement.
 # Approval A n'est PAS verifie automatiquement par ce playbook.
 
 - name: Valider la cible AWX
@@ -28,9 +30,9 @@
           - "Switch : {{ target_device }}"
           - "IP : {{ hostvars[target_device].ansible_host | default('non renseignee') }}"
           - "Firmware cible : {{ aruba_firmware_target.version }}"
-          - "Mode : PREFLIGHT V03.4 SANS TRANSFERT"
+          - "Mode : V03.5 - transfert conditionnel"
 
-- name: Precontrole et preparation firmware Secondary V03.4
+- name: Precontrole et transfert firmware Secondary V03.5
   hosts: "{{ target_device }}"
   gather_facts: false
   vars_files:
@@ -156,6 +158,20 @@
         firmware_secondary_command_preview: >-
           copy tftp flash {{ firmware_tftp_server }} {{ firmware_tftp_path }} secondary
 
+    - name: Determiner si le transfert est explicitement autorise
+      ansible.builtin.set_fact:
+        transfer_requested: >-
+          {{
+            (secondary_transfer_authorized | default(false) | bool)
+            and (secondary_flash_risk_accepted | default(false) | bool)
+          }}
+
+    - name: Refuser une autorisation partielle
+      ansible.builtin.assert:
+        that:
+          - (secondary_transfer_authorized | default(false) | bool) == (secondary_flash_risk_accepted | default(false) | bool)
+        fail_msg: "Les deux autorisations doivent etre false ou toutes les deux true."
+
     - name: Creer le repertoire de rapport
       ansible.builtin.file:
         path: "{{ report_directory }}"
@@ -163,50 +179,182 @@
         mode: "0700"
       delegate_to: localhost
 
-    - name: Enregistrer le rapport de preparation V03.4
+    - name: Verifier l'acces TFTP et le contenu exact avant toute ecriture
+      when: transfer_requested | bool
+      block:
+        - name: Creer un fichier temporaire de verification dans EE
+          ansible.builtin.tempfile:
+            state: file
+            suffix: .swi
+          delegate_to: localhost
+          register: tftp_download_temp
+
+        - name: Telecharger le firmware via TFTP depuis EE
+          ansible.builtin.command:
+            argv:
+              - curl
+              - --fail
+              - --silent
+              - --show-error
+              - --max-time
+              - "180"
+              - --output
+              - "{{ tftp_download_temp.path }}"
+              - "tftp://{{ firmware_tftp_server }}/{{ firmware_tftp_path }}"
+          delegate_to: localhost
+          register: tftp_download_result
+          changed_when: false
+
+        - name: Calculer l'empreinte du fichier TFTP recu
+          ansible.builtin.stat:
+            path: "{{ tftp_download_temp.path }}"
+            checksum_algorithm: sha256
+            get_checksum: true
+          delegate_to: localhost
+          register: tftp_download_file
+
+        - name: Comparer le fichier TFTP au firmware attendu
+          ansible.builtin.assert:
+            that:
+              - tftp_download_file.stat.isreg | default(false)
+              - tftp_download_file.stat.size | default(0) | int == aruba_firmware_target.size_bytes | int
+              - tftp_download_file.stat.checksum | default('') == aruba_firmware_target.sha256
+            fail_msg: "Le fichier servi par TFTP est absent ou differe du firmware valide."
+      always:
+        - name: Supprimer la copie temporaire du firmware TFTP
+          ansible.builtin.file:
+            path: "{{ tftp_download_temp.path }}"
+            state: absent
+          delegate_to: localhost
+          when: tftp_download_temp is defined and tftp_download_temp.path is defined
+
+    - name: Enregistrer le rapport avant transfert
       ansible.builtin.copy:
-        dest: "{{ report_directory }}/secondary_preflight_v034.json"
+        dest: "{{ report_directory }}/secondary_transfer_v035.json"
         mode: "0600"
         content: |
           {{
             {
-              "stage": "secondary_preflight_v034",
+              "stage": "secondary_transfer_v035",
               "target_device": inventory_hostname,
               "target_ip": ansible_host | default(""),
               "workflow_job_id": awx_workflow_job_id | default("manual", true),
               "awx_job_id": awx_job_id | default("manual", true),
               "firmware_target": aruba_firmware_target.version,
               "firmware_sha256": firmware_file.stat.checksum,
-              "firmware_size_bytes": firmware_file.stat.size,
               "expected_before": firmware_expected,
               "detected_before": firmware_detected,
-              "raw_show_version": show_version.stdout,
-              "raw_show_flash": show_flash.stdout,
-              "secondary_command_preview_only": firmware_secondary_command_preview,
-              "flash_capacity_verified": false,
+              "secondary_command": firmware_secondary_command_preview,
               "approval_awx_verified": false,
+              "transfer_requested": transfer_requested | bool,
               "transfer_executed": false,
               "reboot_executed": false
             } | to_nice_json
           }}
       delegate_to: localhost
 
-    - name: Afficher le bilan V03.4
+    - name: Transferer le firmware dans Secondary uniquement
+      ansible.netcommon.cli_command:
+        command: "{{ firmware_secondary_command_preview }}"
+        prompt:
+          - '(?i)Continue \(y/n\)\?'
+        answer:
+          - 'y'
+        check_all: true
+      register: secondary_transfer_result
+      vars:
+        ansible_command_timeout: 1200
+      when: transfer_requested | bool
+      no_log: true
+
+    - name: Verifier la sortie de transfert avant controle flash
+      ansible.builtin.assert:
+        that:
+          - secondary_transfer_result is succeeded
+          - secondary_transfer_result.stdout is defined
+          - secondary_transfer_result.stdout | regex_search('(?i)(transport error|peer unreachable|error in sending|timed out|invalid input|failed)') is none
+        fail_msg: "La commande TFTP a signale une erreur. Ne pas redemarrer; verifier show flash."
+      when: transfer_requested | bool
+
+    - name: Relire show version apres transfert
+      ansible.netcommon.cli_command:
+        command: show version
+      register: show_version_after
+      changed_when: false
+      when: transfer_requested | bool
+
+    - name: Relire show flash apres transfert
+      ansible.netcommon.cli_command:
+        command: show flash
+      register: show_flash_after
+      changed_when: false
+      when: transfer_requested | bool
+
+    - name: Extraire les versions apres transfert
+      ansible.builtin.set_fact:
+        primary_after: >-
+          {{ show_flash_after.stdout | regex_findall('(?im)^Primary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+\.\d+)') }}
+        secondary_after: >-
+          {{ show_flash_after.stdout | regex_findall('(?im)^Secondary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+\.\d+)') }}
+        running_after: >-
+          {{ show_version_after.stdout | regex_findall('(?m)^\s*(WC\.\d+\.\d+\.\d+)\s*$') }}
+        active_after: >-
+          {{ show_version_after.stdout | regex_findall('(?im)^Boot Image:\s*(Primary|Secondary)\s*$') }}
+        default_after: >-
+          {{ show_flash_after.stdout | regex_findall('(?im)^Default Boot Image\s*:\s*(Primary|Secondary)\s*$') }}
+      when: transfer_requested | bool
+
+    - name: Confirmer Secondary mise a jour et Primary intacte
+      ansible.builtin.assert:
+        that:
+          - primary_after | length == 1
+          - secondary_after | length == 1
+          - running_after | length == 1
+          - active_after | length == 1
+          - default_after | length == 1
+          - primary_after[0] == firmware_detected.primary
+          - secondary_after[0] == aruba_firmware_target.version
+          - running_after[0] == firmware_detected.running
+          - active_after[0] == 'Primary'
+          - default_after[0] == 'Primary'
+        fail_msg: "Verification post-transfert non conforme. Ne pas redemarrer."
+      when: transfer_requested | bool
+
+    - name: Enregistrer le rapport final de transfert
+      ansible.builtin.copy:
+        dest: "{{ report_directory }}/secondary_transfer_v035.json"
+        mode: "0600"
+        content: |
+          {{
+            {
+              "stage": "secondary_transfer_v035",
+              "target_device": inventory_hostname,
+              "target_ip": ansible_host | default(""),
+              "workflow_job_id": awx_workflow_job_id | default("manual", true),
+              "awx_job_id": awx_job_id | default("manual", true),
+              "firmware_target": aruba_firmware_target.version,
+              "firmware_sha256": firmware_file.stat.checksum,
+              "detected_before": firmware_detected,
+              "raw_show_flash_after": show_flash_after.stdout,
+              "raw_show_version_after": show_version_after.stdout,
+              "approval_awx_verified": false,
+              "transfer_requested": true,
+              "transfer_executed": true,
+              "post_transfer_verified": true,
+              "reboot_executed": false
+            } | to_nice_json
+          }}
+      delegate_to: localhost
+      when: transfer_requested | bool
+
+    - name: Afficher le bilan V03.5
       ansible.builtin.debug:
         msg:
           - "Switch : {{ inventory_hostname }}"
-          - "Primary : {{ firmware_detected.primary }}"
-          - "Secondary : {{ firmware_detected.secondary }}"
-          - "Firmware actif : {{ firmware_detected.running }}"
-          - "Image active : {{ firmware_detected.boot_image }}"
-          - "Image par defaut : {{ firmware_detected.default_boot }}"
+          - "Primary avant : {{ firmware_detected.primary }}"
+          - "Secondary avant : {{ firmware_detected.secondary }}"
           - "Firmware cible : {{ aruba_firmware_target.version }}"
-          - "Commande PREPAREE NON EXECUTEE : {{ firmware_secondary_command_preview }}"
-          - "Rapport : {{ report_directory }}/secondary_preflight_v034.json"
-
-    - name: Terminer sans transfert
-      ansible.builtin.debug:
-        msg: >-
-          PREFLIGHT V03.4 REUSSI. Commande TFTP uniquement preparee.
-          Aucun transfert, aucune ecriture flash, aucun redemarrage.
-          Approbation AWX non verifiee automatiquement.
+          - "Transfert demande : {{ transfer_requested | bool }}"
+          - "Transfert verifie : {{ (transfer_requested | bool) and (secondary_after | default([]) | length == 1) }}"
+          - "Aucun redemarrage. Approbation AWX non verifiee automatiquement."
+          - "Rapport : {{ report_directory }}/secondary_transfer_v035.json"
