@@ -1,16 +1,16 @@
 ---
-# Aruba 2930F - JT03 V03.7.2 - workflow AWX multi-switch
+# Aruba 2930F - JT03 V03.7.4 - workflow AWX multi-switch
 # Phase 1 : CONTROLES LOCAUX + rapports JT01/JT02 (aucun SSH)
 # Phase 2 : relecture SSH sur TOUS les switches, seulement en mode transfer
 # Phase 3 : transfert Secondary SEQUENTIEL, seulement apres la barriere globale
-# Mode par defaut : simulate (aucune ecriture, aucune connexion SSH).
+# Modes : simulate (defaut), verify_tftp (controle TFTP sans SSH), transfer (ecriture autorisee).
 # AUCUN reboot, AUCUNE modification du boot ou de Primary.
 # IMPORTANT : Approval A reste une garantie du GRAPHE du workflow.
 # Le playbook NE VERIFIE PAS independamment l'etat de l'approbation AWX.
 # Un transfert reel demande secondary_execution_mode=transfer ET les deux drapeaux true.
 # La compatibilite depuis WC.16.11.0010 (SW-1) N'EST PAS validee pour le transfert reel.
 
-- name: JT03 V03.7.2 - Phase 1 - Barriere de preflight locale sans SSH
+- name: JT03 V03.7.4 - Phase 1 - Barriere de preflight locale sans SSH
   hosts: all
   gather_facts: false
   strategy: linear
@@ -39,6 +39,7 @@
       ansible.builtin.set_fact:
         secondary_mode: "{{ secondary_execution_mode | default('simulate') | string | lower }}"
         secondary_transfer_requested: "{{ (secondary_execution_mode | default('simulate') | string | lower) == 'transfer' }}"
+        secondary_tftp_check_requested: "{{ (secondary_execution_mode | default('simulate') | string | lower) in ['verify_tftp', 'transfer'] }}"
         secondary_copy_command: >-
           copy tftp flash {{ firmware_tftp_server }} {{ firmware_tftp_path }} secondary
         # Les vars d'un play ne sont PAS propagees aux plays suivants.
@@ -58,7 +59,7 @@
           - inventory_hostname != 'localhost'
           - device_vendor | default('') | lower == 'aruba'
           - inventory_hostname in aruba_firmware_devices
-          - secondary_mode in ['simulate', 'transfer']
+          - secondary_mode in ['simulate', 'verify_tftp', 'transfer']
           - (secondary_transfer_authorized | default(false) | bool) == (secondary_flash_risk_accepted | default(false) | bool)
           - secondary_transfer_requested | bool or not (secondary_transfer_authorized | default(false) | bool)
           - not (secondary_transfer_requested | bool) or (secondary_transfer_authorized | default(false) | bool)
@@ -66,7 +67,7 @@
         fail_msg: >-
           Refus : contexte AWX/Limit, hote Aruba ou mode/autorisation non conforme.
           Le mode transfer exige les DEUX autorisations true.
-          Le mode simulate exige les DEUX autorisations false.
+          Les modes simulate et verify_tftp exigent les DEUX autorisations false.
 
     - name: Tester le blocage global sur un hote sans risque - optionnel
       ansible.builtin.assert:
@@ -207,7 +208,7 @@
         secondary_local_preflight_ok: true
 
     - name: Verifier le fichier effectivement servi par TFTP dans l'EE
-      when: secondary_transfer_requested | bool
+      when: secondary_tftp_check_requested | bool
       run_once: true
       block:
         - name: Creer un fichier temporaire TFTP
@@ -274,7 +275,7 @@
             {
               'schema_version': 1,
               'stage': 'jt03_secondary_v037',
-              'status': 'ready_for_live_ssh_validation' if secondary_transfer_requested | bool else 'passed_simulation',
+              'status': 'ready_for_live_ssh_validation' if secondary_transfer_requested | bool else ('passed_tftp_verification' if secondary_tftp_check_requested | bool else 'passed_simulation'),
               'workflow_id': workflow_id,
               'job_id': awx_job_id | default(''),
               'hostname': inventory_hostname,
@@ -287,7 +288,7 @@
               'secondary_copy_command': secondary_copy_command,
               'mode': secondary_mode,
               'approval_awx_verified': false,
-              'tftp_checked_from_ee': secondary_transfer_requested | bool,
+              'tftp_checked_from_ee': secondary_tftp_check_requested | bool,
               'tftp_verified_from_switch': false,
               'ssh_connection_executed': false,
               'transfer_executed': false,
@@ -306,9 +307,9 @@
           - "Secondary : {{ precheck_snapshot.initial_firmware.secondary }}"
           - "Cible : {{ firmware_target_version }}"
           - "Rapport : {{ report_path }}"
-          - "SSH : aucun en mode simulate ; ecriture / reboot : aucun en mode simulate"
+          - "SSH : aucun en modes simulate/verify_tftp ; ecriture/reboot : aucun hors mode transfer"
 
-- name: JT03 V03.7.2 - Phase 2 - Validation SSH de tout le lot avant transfert
+- name: JT03 V03.7.4 - Phase 2 - Validation SSH de tout le lot avant transfert
   hosts: all
   gather_facts: false
   strategy: linear
@@ -413,7 +414,7 @@
                  | select('equalto', true) | list | length) == (ansible_play_hosts_all | length)
             fail_msg: "Un switch a echoue aux controles SSH : aucun transfert."
 
-- name: JT03 V03.7.2 - Phase 3 - Ecriture Secondary un switch a la fois
+- name: JT03 V03.7.4 - Phase 3 - Ecriture Secondary un switch a la fois
   hosts: all
   gather_facts: false
   strategy: linear
