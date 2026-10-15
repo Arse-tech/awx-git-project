@@ -219,16 +219,22 @@
         - name: Telecharger une fois l'image depuis le serveur TFTP
           ansible.builtin.command:
             argv:
-              - curl
-              - --fail
-              - --silent
-              - --show-error
-              - --max-time
+              - timeout
               - '180'
-              - --output
+              - tftp
+              - -m
+              - binary
+              - "{{ firmware_tftp_server }}"
+              - -c
+              - get
+              - "{{ firmware_tftp_path }}"
               - "{{ tftp_temp.path }}"
-              - "tftp://{{ firmware_tftp_server }}/{{ firmware_tftp_path }}"
+          register: tftp_download_result
           changed_when: false
+          failed_when: >-
+            tftp_download_result.rc != 0 or
+            'transfer timed out' in ((tftp_download_result.stdout | default('')) ~ ' ' ~ (tftp_download_result.stderr | default('')) | lower) or
+            'error' in ((tftp_download_result.stdout | default('')) ~ ' ' ~ (tftp_download_result.stderr | default('')) | lower)
 
         - name: Calculer SHA256 et taille du fichier recu par TFTP
           ansible.builtin.stat:
