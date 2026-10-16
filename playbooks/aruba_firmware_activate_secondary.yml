@@ -38,10 +38,10 @@
     - name: Definir les parametres de JT04
       ansible.builtin.set_fact:
         jt04_mode: "{{ jt04_execution_mode | default('simulate') | string | lower }}"
-        jt04_source_id: "{{ jt04_source_workflow_id | default('') | string }}"
+        jt04_source_id: "{{ awx_workflow_job_id | default('') | string }}"
         jt04_target_version: "{{ aruba_firmware_target.version }}"
         jt04_report_path: >-
-          {{ archive_root }}/{{ inventory_hostname }}/workflow-{{ jt04_source_workflow_id | default('') }}/secondary_upgrade_v037.json
+          {{ archive_root }}/{{ inventory_hostname }}/workflow-{{ awx_workflow_job_id | default('') }}/secondary_upgrade_v037.json
 
     - name: Verifier le contexte AWX et le Limit du workflow
       ansible.builtin.assert:
