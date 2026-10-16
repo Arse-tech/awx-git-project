@@ -1,23 +1,13 @@
 
----
 # ============================================================
-# Aruba 2930F - JT04 V04.3
-# Activation Secondary - Phase de validation
+# JT04 V04.4 - PHASE 3
+# Simulation de la sequence d'activation Secondary
 #
-# Modes :
-#   simulate   : controles locaux NFS uniquement
-#   verify_ssh : controles NFS + verification SSH
-#
-# AUCUNE ecriture, AUCUN changement de boot, AUCUN reboot.
-#
-# Le Limit est choisi au lancement du workflow AWX.
+# Aucun changement de configuration.
+# Aucun redemarrage.
 # ============================================================
 
-# ============================================================
-# PHASE 1 - PREFLIGHT LOCAL
-# ============================================================
-
-- name: JT04 V04.3 - Phase 1 - Preflight local multi-switch
+- name: JT04 V04.4 - Phase 3 - Simulation activation Secondary
   hosts: all
   gather_facts: false
   strategy: linear
@@ -28,216 +18,29 @@
 
   vars:
     ansible_connection: local
-    archive_root: /awx-storage/reports/aruba
 
   tasks:
-    - name: Definir les parametres de JT04
-      ansible.builtin.set_fact:
-        jt04_mode: >-
-          {{ jt04_execution_mode | default('simulate') | string | lower }}
-        jt04_source_id: >-
-          {{ jt04_source_workflow_id | default('') | string }}
-        jt04_target_version: "{{ aruba_firmware_target.version }}"
-        jt04_report_path: >-
-          {{ archive_root }}/{{ inventory_hostname }}/workflow-{{ jt04_source_workflow_id | default('') }}/secondary_upgrade_v037.json
-
-    - name: Verifier le contexte AWX et le Limit du workflow
-      ansible.builtin.assert:
-        that:
-          - awx_workflow_job_id is defined
-          - awx_workflow_job_id | string | length > 0
-          - ansible_limit is defined
-          - (ansible_limit | default('') | trim) is match('^[A-Za-z0-9_.-]+([,:][A-Za-z0-9_.-]+)*$')
-          - (ansible_limit | default('') | regex_findall('[^,:]+') | unique | sort | list) == (ansible_play_hosts_all | sort)
-          - ansible_play_hosts_all | length > 0
-          - inventory_hostname != 'localhost'
-          - device_vendor | default('') | lower == 'aruba'
-          - inventory_hostname in aruba_firmware_devices
-          - jt04_mode in ['simulate', 'verify_ssh']
-          - not (jt04_activation_authorized | default(false) | bool)
-          - not (jt04_reboot_risk_accepted | default(false) | bool)
-          - jt04_source_id is match('^[0-9]+$')
-        fail_msg: >-
-          JT04 refuse : contexte AWX, Limit, inventaire,
-          reference JT03 ou mode non conforme.
-
-    - name: Verifier le montage NFS
-      ansible.builtin.command:
-        cmd: mountpoint -q /awx-storage
-      changed_when: false
-
-    - name: Verifier la presence du rapport JT03
-      ansible.builtin.stat:
-        path: "{{ jt04_report_path }}"
-      register: jt04_source_stat
-
-    - name: Exiger un rapport JT03 regulier
-      ansible.builtin.assert:
-        that:
-          - jt04_source_stat.stat.exists | default(false) | bool
-          - jt04_source_stat.stat.isreg | default(false) | bool
-        fail_msg: >-
-          Rapport JT03 absent pour {{ inventory_hostname }}.
-
-    - name: Lire le rapport JT03
-      ansible.builtin.slurp:
-        src: "{{ jt04_report_path }}"
-      register: jt04_source_raw
-      no_log: true
-
-    - name: Decoder le rapport JT03
-      ansible.builtin.set_fact:
-        jt04_source_report: >-
-          {{ jt04_source_raw.content | b64decode | from_json }}
-      no_log: true
-
-    - name: Verifier le rapport et la protection Primary
-      ansible.builtin.assert:
-        that:
-          - jt04_source_report.schema_version | default(0) | int == 1
-          - jt04_source_report.stage | default('') == 'jt03_secondary_v037'
-          - jt04_source_report.status | default('') == 'passed_verified'
-          - jt04_source_report.workflow_id | default('') | string == jt04_source_id
-          - jt04_source_report.hostname | default('') == inventory_hostname
-          - jt04_source_report.selected_hosts | default([]) | sort == ansible_play_hosts_all | sort
-          - jt04_source_report.primary_after | default('') == aruba_firmware_devices[inventory_hostname].primary_before
-          - jt04_source_report.secondary_after | default('') == jt04_target_version
-          - jt04_source_report.running_after | default('') == aruba_firmware_devices[inventory_hostname].running_before
-          - jt04_source_report.active_after | default('') == 'Primary'
-          - jt04_source_report.default_after | default('') == 'Primary'
-          - jt04_source_report.transfer_executed | default(false) | bool
-          - jt04_source_report.post_transfer_verified | default(false) | bool
-          - not (jt04_source_report.reboot_executed | default(true) | bool)
-        fail_msg: >-
-          Rapport JT03 non conforme pour {{ inventory_hostname }}.
-          Activation interdite.
-
-    - name: Marquer le preflight local comme valide
-      ansible.builtin.set_fact:
-        jt04_local_preflight_ok: true
-
-    - name: Barriere globale sur tous les switches selectionnes
-      ansible.builtin.assert:
-        that:
-          - >-
-            (ansible_play_hosts_all
-             | map('extract', hostvars, 'jt04_local_preflight_ok')
-             | select('equalto', true)
-             | list | length) == (ansible_play_hosts_all | length)
-        fail_msg: >-
-          Preflight JT04 incomplet : lot bloque.
-
-    - name: Bilan du preflight local
-      ansible.builtin.debug:
-        msg:
-          - "JT04 V04.3 : preflight valide"
-          - "Switch : {{ inventory_hostname }}"
-          - "Workflow source JT03 : {{ jt04_source_id }}"
-          - "Limit AWX : {{ ansible_limit }}"
-          - "Primary : {{ jt04_source_report.primary_after }}"
-          - "Secondary : {{ jt04_source_report.secondary_after }}"
-          - "Mode : {{ jt04_mode }}"
-          - "SSH demande : {{ jt04_mode == 'verify_ssh' }}"
-          - "Modification : aucune"
-          - "Redemarrage : aucun"
-
-# ============================================================
-# PHASE 2 - VERIFICATION SSH
-# ============================================================
-
-- name: JT04 V04.3 - Phase 2 - Verification SSH du lot
-  hosts: all
-  gather_facts: false
-  strategy: linear
-  any_errors_fatal: true
-
-  vars_files:
-    - ../vars/aruba_firmware_devices.yml
-
-  vars:
-    ansible_connection: ansible.netcommon.network_cli
-    ansible_network_os: arubanetworks.aos_switch.arubaoss
-    ansible_command_timeout: 120
-
-  tasks:
-    - name: Verifier si la lecture SSH est demandee
-      ansible.builtin.set_fact:
-        jt04_ssh_requested: >-
-          {{ jt04_mode == 'verify_ssh' }}
-
-    - name: Verifier l'etat reel des switches
-      when: jt04_ssh_requested | bool
+    - name: Executer la simulation uniquement apres verification SSH
+      when: jt04_mode == 'verify_ssh'
       block:
 
-        - name: Exiger le preflight local de tout le lot
+        - name: Verifier les protections avant simulation
           ansible.builtin.assert:
             that:
               - jt04_local_preflight_ok | default(false) | bool
-              - >-
-                (ansible_play_hosts_all
-                 | map('extract', hostvars, 'jt04_local_preflight_ok')
-                 | select('equalto', true)
-                 | list | length) == (ansible_play_hosts_all | length)
+              - jt04_ssh_ready | default(false) | bool
+              - jt04_source_report.status == 'passed_verified'
+              - jt04_target_version == aruba_firmware_target.version
+              - inventory_hostname in (jt04_allowed_hosts | default([]))
+              - jt04_target_boot_image == 'Secondary'
+              - jt04_change_default_boot | bool
+              - not (jt04_activation_authorized | default(false) | bool)
+              - not (jt04_reboot_risk_accepted | default(false) | bool)
             fail_msg: >-
-              Preflight local incomplet.
-              Verification SSH interdite.
+              JT04 V04.4 refuse : conditions de simulation
+              non conformes pour {{ inventory_hostname }}.
 
-        - name: Lire show version
-          ansible.netcommon.cli_command:
-            command: show version
-          register: jt04_version_live
-          changed_when: false
-
-        - name: Lire show flash
-          ansible.netcommon.cli_command:
-            command: show flash
-          register: jt04_flash_live
-          changed_when: false
-
-        - name: Extraire les informations firmware
-          ansible.builtin.set_fact:
-            jt04_primary_live: >-
-              {{ jt04_flash_live.stdout | regex_findall('(?im)^Primary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+\.\d+)') }}
-            jt04_secondary_live: >-
-              {{ jt04_flash_live.stdout | regex_findall('(?im)^Secondary Image\s*:\s*\d+\s+\S+\s+(WC\.\d+\.\d+\.\d+)') }}
-            jt04_running_live: >-
-              {{ jt04_version_live.stdout | regex_findall('(?m)^\s*(WC\.\d+\.\d+\.\d+)\s*$') }}
-            jt04_active_live: >-
-              {{ jt04_version_live.stdout | regex_findall('(?im)^Boot Image:\s*(Primary|Secondary)\s*$') }}
-            jt04_default_live: >-
-              {{ jt04_flash_live.stdout | regex_findall('(?im)^Default Boot Image\s*:\s*(Primary|Secondary)\s*$') }}
-
-        - name: Refuser les sorties CLI incompletes ou ambigues
-          ansible.builtin.assert:
-            that:
-              - jt04_primary_live | length == 1
-              - jt04_secondary_live | length == 1
-              - jt04_running_live | length == 1
-              - jt04_active_live | length == 1
-              - jt04_default_live | length == 1
-            fail_msg: >-
-              Impossible d'identifier les versions
-              ou le boot sans ambiguite.
-
-        - name: Comparer l'etat reel avec le rapport JT03
-          ansible.builtin.assert:
-            that:
-              - jt04_primary_live[0] == jt04_source_report.primary_after
-              - jt04_secondary_live[0] == jt04_source_report.secondary_after
-              - jt04_running_live[0] == jt04_source_report.running_after
-              - jt04_active_live[0] == jt04_source_report.active_after
-              - jt04_default_live[0] == jt04_source_report.default_after
-              - jt04_secondary_live[0] == jt04_target_version
-              - jt04_primary_live[0] == aruba_firmware_devices[inventory_hostname].primary_before
-            fail_msg: >-
-              Etat reel different du rapport JT03.
-              Activation interdite.
-
-        - name: Marquer le controle SSH comme valide
-          ansible.builtin.set_fact:
-            jt04_ssh_ready: true
-
-        - name: Barriere globale apres verification SSH
+        - name: Verifier que tout le lot est pret
           ansible.builtin.assert:
             that:
               - >-
@@ -246,18 +49,47 @@
                  | select('equalto', true)
                  | list | length) == (ansible_play_hosts_all | length)
             fail_msg: >-
-              Au moins un switch du lot n'est pas pret.
-              Activation interdite.
+              Un switch du lot n'a pas valide le controle SSH.
 
-        - name: Afficher le bilan SSH
+        - name: Definir le plan d'activation simule
+          ansible.builtin.set_fact:
+            jt04_activation_plan:
+              hostname: "{{ inventory_hostname }}"
+              source_workflow_id: "{{ jt04_source_id }}"
+              target_version: "{{ jt04_target_version }}"
+              current_active_image: "{{ jt04_active_live[0] }}"
+              current_default_image: "{{ jt04_default_live[0] }}"
+              target_boot_image: "Secondary"
+              change_default_boot: true
+              reboot_planned: true
+              activation_executed: false
+              reboot_executed: false
+              simulation_status: "ready_for_future_activation"
+
+        - name: Barriere globale des plans d'activation
+          ansible.builtin.assert:
+            that:
+              - >-
+                (ansible_play_hosts_all
+                 | map('extract', hostvars, 'jt04_activation_plan')
+                 | selectattr('simulation_status',
+                              'equalto',
+                              'ready_for_future_activation')
+                 | list | length) == (ansible_play_hosts_all | length)
+            fail_msg: >-
+              Tous les plans d'activation ne sont pas valides.
+
+        - name: Afficher la simulation de l'activation
           ansible.builtin.debug:
             msg:
-              - "JT04 V04.3 : verification SSH validee"
+              - "JT04 V04.4 : plan d'activation valide"
               - "Switch : {{ inventory_hostname }}"
-              - "Primary : {{ jt04_primary_live[0] }}"
-              - "Secondary : {{ jt04_secondary_live[0] }}"
-              - "Version active : {{ jt04_running_live[0] }}"
-              - "Boot actif : {{ jt04_active_live[0] }}"
-              - "Boot par defaut : {{ jt04_default_live[0] }}"
-              - "Modification : aucune"
-              - "Redemarrage : aucun"
+              - "Firmware cible : {{ jt04_target_version }}"
+              - "Image actuellement active : {{ jt04_active_live[0] }}"
+              - "Boot par defaut actuel : {{ jt04_default_live[0] }}"
+              - "Image cible : Secondary"
+              - "Changement du boot par defaut : PREVU"
+              - "Redemarrage : PREVU"
+              - "Execution du changement : NON"
+              - "Execution du redemarrage : NON"
+              - "Statut : {{ jt04_activation_plan.simulation_status }}"
