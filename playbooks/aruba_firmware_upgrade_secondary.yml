@@ -158,15 +158,14 @@
       ansible.builtin.assert:
         that:
           - precheck_snapshot.initial_firmware.primary == aruba_firmware_devices[inventory_hostname].primary_before
-          - precheck_snapshot.initial_firmware.secondary == aruba_firmware_devices[inventory_hostname].secondary_before
           - precheck_snapshot.initial_firmware.running == aruba_firmware_devices[inventory_hostname].running_before
           - precheck_snapshot.initial_firmware.boot_image == aruba_firmware_devices[inventory_hostname].boot_image_before
           - precheck_snapshot.initial_firmware.default_boot == aruba_firmware_devices[inventory_hostname].default_boot_before
           - precheck_snapshot.initial_firmware.boot_image == 'Primary'
           - precheck_snapshot.initial_firmware.default_boot == 'Primary'
           - precheck_snapshot.initial_firmware.running == precheck_snapshot.initial_firmware.primary
-          - precheck_snapshot.initial_firmware.secondary != firmware_target_version
-        fail_msg: "Etat initial inattendu ou Secondary deja a jour. Aucun transfert."
+          - precheck_snapshot.initial_firmware.secondary in [aruba_firmware_devices[inventory_hostname].secondary_before, firmware_target_version]
+        fail_msg: "Etat initial inattendu. Aucun transfert."
 
     - name: Refuser le transfert reel depuis une version de depart non validee
       ansible.builtin.assert:
@@ -369,9 +368,8 @@
               - active_live[0] == 'Primary'
               - default_live[0] == 'Primary'
               - running_live[0] == primary_live[0]
-              - secondary_live[0] != v037_firmware_target_version
             fail_msg: >-
-              Etat reel different de JT01 ou Secondary deja a jour.
+              Etat reel different de JT01.
               Aucun switch du lot ne doit etre ecrit.
 
         - name: Marquer le switch comme valide apres relecture SSH
@@ -425,8 +423,57 @@
     ansible_network_os: arubanetworks.aos_switch.arubaoss
     ansible_command_timeout: 120
   tasks:
+    - name: Archiver Secondary deja a jour apres controle SSH
+      when:
+        - secondary_transfer_requested | default(false) | bool
+        - secondary_live_ready | default(false) | bool
+        - secondary_live[0] == v037_firmware_target_version
+      block:
+        - name: Confirmer que le lot entier a passe le controle SSH
+          ansible.builtin.assert:
+            that:
+              - >-
+                (ansible_play_hosts_all | map('extract', hostvars, 'secondary_live_ready')
+                 | select('equalto', true) | list | length) == (ansible_play_hosts_all | length)
+              - primary_live[0] == precheck_snapshot.initial_firmware.primary
+              - running_live[0] == precheck_snapshot.initial_firmware.running
+              - active_live[0] == 'Primary'
+              - default_live[0] == 'Primary'
+        - name: Enregistrer le resultat verifie sans nouvelle copie
+          ansible.builtin.copy:
+            dest: "{{ v037_report_path }}"
+            mode: '0600'
+            content: |
+              {{
+                {
+                  'schema_version': 1,
+                  'stage': 'jt03_secondary_v037',
+                  'status': 'passed_verified',
+                  'workflow_id': v037_workflow_id,
+                  'job_id': awx_job_id | default(''),
+                  'hostname': inventory_hostname,
+                  'selected_hosts': ansible_play_hosts_all | sort,
+                  'primary_after': primary_live[0],
+                  'secondary_after': secondary_live[0],
+                  'running_after': running_live[0],
+                  'active_after': active_live[0],
+                  'default_after': default_live[0],
+                  'target_firmware': v037_firmware_target_version,
+                  'transfer_executed': false,
+                  'post_transfer_verified': true,
+                  'already_up_to_date': true,
+                  'reboot_executed': false
+                } | to_nice_json
+              }}
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
+
     - name: Transferer uniquement lorsque toutes les barrieres sont franchies
-      when: secondary_transfer_requested | default(false) | bool
+      when:
+        - secondary_transfer_requested | default(false) | bool
+        - secondary_live_ready | default(false) | bool
+        - secondary_live[0] != v037_firmware_target_version
       block:
         - name: Exiger la validation SSH de TOUS les switches
           ansible.builtin.assert:
@@ -545,6 +592,7 @@
                   'target_firmware': v037_firmware_target_version,
                   'approval_awx_verified': false,
                   'transfer_executed': true,
+                  'already_up_to_date': false,
                   'post_transfer_verified': true,
                   'reboot_executed': false
                 } | to_nice_json
