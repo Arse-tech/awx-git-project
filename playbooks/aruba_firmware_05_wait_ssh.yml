@@ -1,0 +1,59 @@
+---
+# JT05 - Attente du retour SSH apres une activation reelle autorisee.
+# Aucun changement sur le switch.
+- name: JT05 - Attendre le retour SSH du lot
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  any_errors_fatal: true
+  vars_files:
+    - ../vars/aruba_firmware_devices.yml
+  vars:
+    ansible_connection: local
+    archive_root: /awx-storage/reports/aruba
+    workflow_id: "{{ awx_workflow_job_id | default('', true) | string }}"
+    report_dir: "{{ archive_root }}/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
+    activation_report_path: "{{ report_dir }}/activation_v05.json"
+  tasks:
+    - name: Exiger un contexte workflow et un Limit explicite
+      ansible.builtin.assert:
+        that:
+          - workflow_id is match('^[0-9]+$')
+          - ansible_limit is defined
+          - (ansible_limit | default('') | regex_findall('[^,:]+') | unique | sort | list) == (ansible_play_hosts_all | sort)
+          - inventory_hostname in (jt04_allowed_hosts | default([]))
+          - device_vendor | default('') | lower == 'aruba'
+    - name: Lire le rapport d'activation
+      ansible.builtin.slurp:
+        src: "{{ activation_report_path }}"
+      register: activation_raw
+      no_log: true
+    - name: Decoder le rapport
+      ansible.builtin.set_fact:
+        activation_report: "{{ activation_raw.content | b64decode | from_json }}"
+      no_log: true
+    - name: Autoriser l'attente seulement apres activation reelle
+      ansible.builtin.assert:
+        that:
+          - activation_report.workflow_id | string == workflow_id
+          - activation_report.hostname == inventory_hostname
+          - activation_report.selected_hosts | sort == ansible_play_hosts_all | sort
+          - activation_report.status == 'reboot_requested'
+          - activation_report.activation_executed | bool
+          - activation_report.reboot_requested | bool
+        fail_msg: "Pas de preuve d'activation reelle : attente JT05 refusee."
+    - name: Attendre que le port SSH soit accessible
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ ansible_port | default(22) | int }}"
+        state: started
+        delay: 20
+        sleep: 10
+        timeout: 900
+      delegate_to: localhost
+    - name: Enregistrer le retour TCP SSH
+      ansible.builtin.copy:
+        dest: "{{ report_dir }}/wait_ssh_v05.json"
+        mode: '0600'
+        content: |
+          {{ {'stage': 'jt05_wait_ssh', 'status': 'ssh_port_reachable', 'workflow_id': workflow_id, 'hostname': inventory_hostname, 'selected_hosts': ansible_play_hosts_all | sort, 'ssh_port_reachable': true, 'firmware_verified': false} | to_nice_json }}
