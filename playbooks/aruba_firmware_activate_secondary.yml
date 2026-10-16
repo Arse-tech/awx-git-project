@@ -106,8 +106,9 @@
           - jt04_source_report.running_after | default('') == aruba_firmware_devices[inventory_hostname].running_before
           - jt04_source_report.active_after | default('') == 'Primary'
           - jt04_source_report.default_after | default('') == 'Primary'
-          - jt04_source_report.transfer_executed | default(false) | bool
+          - (jt04_source_report.transfer_executed | default(false) | bool) or (jt04_source_report.already_up_to_date | default(false) | bool)
           - jt04_source_report.post_transfer_verified | default(false) | bool
+          - not ((jt04_source_report.transfer_executed | default(false) | bool) and (jt04_source_report.already_up_to_date | default(false) | bool))
           - not (jt04_source_report.reboot_executed | default(true) | bool)
         fail_msg: >-
           Rapport JT03 non conforme pour {{ inventory_hostname }}.
