@@ -24,3 +24,28 @@ aruba_firmware_target:
   tftp_server: "172.16.23.162"
   tftp_path: "aruba/2930F/WC_16_11_0030.swi"
 
+# ============================================================
+# JT04 - Activation du firmware Secondary
+# ============================================================
+
+# Workflow AWX ayant realise et valide le transfert JT03
+jt04_source_workflow_id: "279365"
+
+# Modes prevus : simulate / activate
+# Aucun redemarrage en mode simulate
+jt04_execution_mode: "simulate"
+
+# Autorisations explicites pour une activation reelle
+jt04_activation_authorized: false
+jt04_reboot_risk_accepted: false
+
+# Switch autorise pour JT04
+# SW-1 est volontairement exclu
+jt04_allowed_hosts:
+  - "CSE-LAB-B01-ARU-SW-2"
+
+# Image cible pour l'activation
+jt04_target_boot_image: "Secondary"
+
+# Option B : Secondary devient l'image de boot par defaut
+jt04_change_default_boot: true
