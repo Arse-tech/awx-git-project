@@ -1,1 +1,110 @@
 
+---
+# Aruba 2930F - JT04 V04.1
+# Phase initiale : controles locaux uniquement.
+# Aucun SSH, aucune modification, aucun redemarrage.
+
+- name: JT04 V04.1 - Preflight local
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  any_errors_fatal: true
+
+  vars_files:
+    - ../vars/aruba_firmware_devices.yml
+
+  vars:
+    ansible_connection: local
+
+    archive_root: /awx-storage/reports/aruba
+
+    source_workflow_id: "{{ jt04_source_workflow_id | string }}"
+
+    source_report_path: >-
+      {{ archive_root }}/{{ inventory_hostname }}/workflow-{{ source_workflow_id }}/secondary_upgrade_v037.json
+
+    firmware_target_version: "WC.16.11.0030"
+
+  tasks:
+    - name: Definir le mode JT04
+      ansible.builtin.set_fact:
+        jt04_mode: "{{ jt04_execution_mode | default('simulate') | lower }}"
+
+    - name: Verifier le contexte AWX et le perimetre
+      ansible.builtin.assert:
+        that:
+          - awx_workflow_job_id is defined
+          - ansible_limit is defined
+          - ansible_limit == 'CSE-LAB-B01-ARU-SW-2'
+          - inventory_hostname == 'CSE-LAB-B01-ARU-SW-2'
+          - inventory_hostname in jt04_allowed_hosts
+          - device_vendor | default('') | lower == 'aruba'
+          - jt04_mode == 'simulate'
+          - not (jt04_activation_authorized | bool)
+          - not (jt04_reboot_risk_accepted | bool)
+        fail_msg: >-
+          JT04 refuse : contexte AWX, switch,
+          Limit ou autorisations non conformes.
+
+    - name: Verifier le montage NFS
+      ansible.builtin.command:
+        cmd: mountpoint -q /awx-storage
+      changed_when: false
+
+    - name: Verifier la presence du rapport JT03
+      ansible.builtin.stat:
+        path: "{{ source_report_path }}"
+      register: jt03_report_stat
+
+    - name: Exiger le rapport JT03
+      ansible.builtin.assert:
+        that:
+          - jt03_report_stat.stat.exists | default(false)
+          - jt03_report_stat.stat.isreg | default(false)
+        fail_msg: "Rapport JT03 introuvable ou invalide."
+
+    - name: Lire le rapport JT03
+      ansible.builtin.slurp:
+        src: "{{ source_report_path }}"
+      register: jt03_report_raw
+      no_log: true
+
+    - name: Decoder le rapport JT03
+      ansible.builtin.set_fact:
+        jt03_report: "{{ jt03_report_raw.content | b64decode | from_json }}"
+      no_log: true
+
+    - name: Verifier le transfert valide par JT03
+      ansible.builtin.assert:
+        that:
+          - jt03_report.schema_version | int == 1
+          - jt03_report.stage == 'jt03_secondary_v037'
+          - jt03_report.status == 'passed_verified'
+          - jt03_report.workflow_id | string == source_workflow_id
+          - jt03_report.hostname == inventory_hostname
+          - jt03_report.selected_hosts == [inventory_hostname]
+          - jt03_report.primary_after == aruba_firmware_devices[inventory_hostname].primary_before
+          - jt03_report.secondary_after == firmware_target_version
+          - jt03_report.running_after == aruba_firmware_devices[inventory_hostname].running_before
+          - jt03_report.active_after == 'Primary'
+          - jt03_report.default_after == 'Primary'
+          - jt03_report.transfer_executed | bool
+          - jt03_report.post_transfer_verified | bool
+          - not (jt03_report.reboot_executed | bool)
+        fail_msg: >-
+          Le rapport JT03 ne permet pas
+          d'autoriser la suite de JT04.
+
+    - name: Afficher le bilan de simulation
+      ansible.builtin.debug:
+        msg:
+          - "JT04 V04.1 : preflight valide"
+          - "Switch : {{ inventory_hostname }}"
+          - "Workflow source : {{ source_workflow_id }}"
+          - "Primary : {{ jt03_report.primary_after }}"
+          - "Secondary : {{ jt03_report.secondary_after }}"
+          - "Mode : {{ jt04_mode }}"
+          - "SSH : aucun"
+          - "Modification du boot : aucune"
+          - "Redemarrage : aucun"
+
