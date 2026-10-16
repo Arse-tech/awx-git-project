@@ -55,9 +55,9 @@
           - inventory_hostname != 'localhost'
           - device_vendor | default('') | lower == 'aruba'
           - inventory_hostname in aruba_firmware_devices
-          - jt04_mode in ['simulate', 'verify_ssh']
-          - not (jt04_activation_authorized | default(false) | bool)
-          - not (jt04_reboot_risk_accepted | default(false) | bool)
+          - jt04_mode in ['simulate', 'verify_ssh', 'activate']
+          - (jt04_activation_authorized | default(false) | bool) == (jt04_reboot_risk_accepted | default(false) | bool)
+          - (jt04_mode == 'activate') == (jt04_activation_authorized | default(false) | bool)
           - jt04_source_id is match('^[0-9]+$')
         fail_msg: >-
           JT04 refuse : contexte AWX, Limit, inventaire,
@@ -165,7 +165,7 @@
 
     - name: Verifier si la lecture SSH est demandee
       ansible.builtin.set_fact:
-        jt04_ssh_requested: "{{ jt04_mode == 'verify_ssh' }}"
+        jt04_ssh_requested: "{{ jt04_mode in ['verify_ssh', 'activate'] }}"
 
     - name: Verifier l'etat reel des switches
       when: jt04_ssh_requested | bool
@@ -282,7 +282,7 @@
   tasks:
 
     - name: Simuler uniquement apres verification SSH
-      when: jt04_mode == 'verify_ssh'
+      when: jt04_mode in ['verify_ssh', 'activate']
       block:
 
         - name: Verifier les protections avant simulation
@@ -295,8 +295,8 @@
               - inventory_hostname in (jt04_allowed_hosts | default([]))
               - jt04_target_boot_image == 'Secondary'
               - jt04_change_default_boot | bool
-              - not (jt04_activation_authorized | default(false) | bool)
-              - not (jt04_reboot_risk_accepted | default(false) | bool)
+              - (jt04_mode == 'activate') == (jt04_activation_authorized | default(false) | bool)
+              - (jt04_mode == 'activate') == (jt04_reboot_risk_accepted | default(false) | bool)
             fail_msg: >-
               JT04 V04.4 refuse : conditions de simulation
               non conformes pour {{ inventory_hostname }}.
@@ -354,3 +354,131 @@
               - "Execution du changement : NON"
               - "Execution du redemarrage : NON"
               - "Statut : {{ jt04_activation_plan.simulation_status }}"
+
+
+# PHASE 4 - ACTIVATION REELLE (verrouillee par defaut)
+# Uniquement SW-2, un seul switch par execution.
+# La preuve "reboot_dispatch_uncertain" est ecrite AVANT l'envoi du reboot.
+# Ne JAMAIS relancer automatiquement JT04 si le statut est incertain.
+- name: JT04 V04.7 - Activation Secondary avec verrou anti-rejeu
+  hosts: all
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  vars_files:
+    - ../vars/aruba_firmware_devices.yml
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 120
+    jt04_activation_dir: "/awx-storage/reports/aruba/{{ inventory_hostname }}/workflow-{{ awx_workflow_job_id }}"
+    jt04_activation_file: "{{ jt04_activation_dir }}/activation_v047.json"
+  tasks:
+    - name: Activation reelle - verrous
+      when: jt04_mode | default('') == 'activate'
+      block:
+        - name: Exiger un seul switch SW-2 et une autorisation explicite
+          ansible.builtin.assert:
+            that:
+              - ansible_play_hosts_all | length == 1
+              - inventory_hostname == 'CSE-LAB-B01-ARU-SW-2'
+              - inventory_hostname in (jt04_allowed_hosts | default([]))
+              - jt04_activation_authorized | default(false) | bool
+              - jt04_reboot_risk_accepted | default(false) | bool
+              - jt04_secondary_reboot_prompt_validated | default(false) | bool
+              - jt04_secondary_reboot_prompt_regex is defined
+              - jt04_secondary_reboot_prompt_regex | default('') | length > 10
+              - jt04_local_preflight_ok | default(false) | bool
+              - jt04_ssh_ready | default(false) | bool
+              - jt04_target_boot_image == 'Secondary'
+              - jt04_change_default_boot | bool
+              - jt04_secondary_live[0] == jt04_target_version
+              - jt04_active_live[0] == 'Primary'
+              - jt04_default_live[0] == 'Primary'
+            fail_msg: >-
+              Activation interdite : verifier les autorisations, le dialogue
+              de confirmation du reboot et l'etat du switch SW-2.
+
+        - name: Verifier si une tentative est deja archivee
+          ansible.builtin.stat:
+            path: "{{ jt04_activation_file }}"
+          register: jt04_previous_attempt
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
+
+        - name: Interdire le rejeu d'une activation deja tentee
+          ansible.builtin.assert:
+            that:
+              - not (jt04_previous_attempt.stat.exists | default(false) | bool)
+            fail_msg: >-
+              Fichier de tentative deja present. Ne pas relancer le reboot.
+              Examiner manuellement le switch et {{ jt04_activation_file }}.
+
+        - name: Enregistrer le debut de tentative
+          ansible.builtin.copy:
+            dest: "{{ jt04_activation_file }}"
+            mode: '0600'
+            force: false
+            content: |
+              {{ {'stage':'jt04_activation','status':'activation_started','workflow_id':awx_workflow_job_id | string,'hostname':inventory_hostname,'selected_hosts':ansible_play_hosts_all | sort,'target_version':jt04_target_version,'reboot_confirmed':false} | to_nice_json }}
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
+
+        - name: Definir Secondary comme boot par defaut
+          ansible.netcommon.cli_command:
+            command: boot set-default flash secondary
+          changed_when: true
+
+        - name: Relire show flash apres changement du boot par defaut
+          ansible.netcommon.cli_command:
+            command: show flash
+          register: jt04_flash_after_default
+          changed_when: false
+
+        - name: Extraire le boot par defaut confirme
+          ansible.builtin.set_fact:
+            jt04_default_after: >-
+              {{ jt04_flash_after_default.stdout | regex_findall('(?im)^Default Boot Image\s*:\s*(Primary|Secondary)\s*$') }}
+
+        - name: Exiger que Secondary soit le boot par defaut
+          ansible.builtin.assert:
+            that:
+              - jt04_default_after | length == 1
+              - jt04_default_after[0] == 'Secondary'
+            fail_msg: >-
+              Boot Secondary non confirme par show flash : aucun reboot demande.
+
+        - name: Archiver l'etat incertain AVANT le reboot
+          ansible.builtin.copy:
+            dest: "{{ jt04_activation_file }}"
+            mode: '0600'
+            content: |
+              {{ {'stage':'jt04_activation','status':'reboot_dispatch_uncertain','workflow_id':awx_workflow_job_id | string,'hostname':inventory_hostname,'selected_hosts':ansible_play_hosts_all | sort,'target_version':jt04_target_version,'default_boot_verified':'Secondary','reboot_confirmed':false,'manual_reconciliation_required':true} | to_nice_json }}
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
+
+        - name: Envoyer une seule demande de reboot Secondary
+          ansible.netcommon.cli_command:
+            command: boot system flash secondary
+            prompt:
+              - "{{ jt04_secondary_reboot_prompt_regex }}"
+            answer:
+              - 'y'
+            check_all: true
+          register: jt04_reboot_cli
+          vars:
+            ansible_command_timeout: 180
+          changed_when: true
+
+        - name: Archiver le retour de la commande de reboot
+          ansible.builtin.copy:
+            dest: "{{ jt04_activation_file }}"
+            mode: '0600'
+            content: |
+              {{ {'stage':'jt04_activation','status':'reboot_command_returned','workflow_id':awx_workflow_job_id | string,'hostname':inventory_hostname,'selected_hosts':ansible_play_hosts_all | sort,'target_version':jt04_target_version,'default_boot_verified':'Secondary','reboot_confirmed':false,'manual_reconciliation_required':true} | to_nice_json }}
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
