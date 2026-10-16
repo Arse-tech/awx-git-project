@@ -28,24 +28,26 @@ aruba_firmware_target:
 # JT04 - Activation du firmware Secondary
 # ============================================================
 
-# Workflow AWX ayant realise et valide le transfert JT03
-jt04_source_workflow_id: "279365"
+# Reference JT03 dynamique :
+# JT04 utilisera awx_workflow_job_id du workflow en cours.
+jt04_source_workflow_id: ""
 
-# Modes prevus : simulate / activate
-# Aucun redemarrage en mode simulate
-jt04_execution_mode: "simulate"
+# Mode de verification uniquement :
+# controles locaux + SSH + simulation du plan d'activation.
+jt04_execution_mode: "verify_ssh"
 
-# Autorisations explicites pour une activation reelle
+# Activation et redemarrage reels interdits.
 jt04_activation_authorized: false
 jt04_reboot_risk_accepted: false
 
-# Switch autorise pour JT04
-# SW-1 est volontairement exclu
+# Switch autorise pour JT04 en laboratoire.
+# SW-1 reste exclu.
 jt04_allowed_hosts:
   - "CSE-LAB-B01-ARU-SW-2"
 
-# Image cible pour l'activation
+# Image cible
 jt04_target_boot_image: "Secondary"
 
-# Option B : Secondary devient l'image de boot par defaut
+# Option B : Secondary deviendra l'image par defaut
+# uniquement lors d'une future activation autorisee.
 jt04_change_default_boot: true
