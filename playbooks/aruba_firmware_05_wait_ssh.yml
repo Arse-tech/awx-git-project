@@ -1,7 +1,8 @@
+
 ---
-# JT05 V05.2 - Retour SSH apres activation Secondary.
+# JT05 V05.3 - Retour SSH apres activation Secondary.
 # Ne commande jamais de reboot. Un etat ambigu autorise uniquement une observation SSH, jamais un reboot.
-- name: JT05 V05.2 - Attendre le retour SSH apres activation confirmee
+- name: JT05 V05.3 - Attendre le retour SSH apres activation confirmee
   hosts: all
   gather_facts: false
   strategy: linear
@@ -14,6 +15,7 @@
     workflow_id: "{{ awx_workflow_job_id | default('', true) | string }}"
     report_dir: "{{ archive_root }}/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
     activation_report_path: "{{ report_dir }}/activation_v047.json"
+    reconciliation_report_path: "{{ report_dir }}/reconciliation_v01.json"
   tasks:
     - name: Verifier contexte et perimetre
       ansible.builtin.assert:
@@ -58,6 +60,40 @@
           - activation_report.manual_reconciliation_required | default(false) | bool
         fail_msg: >-
           Rapport JT04 non eligible a une observation SSH. Ne pas relancer JT04.
+    - name: Verifier le rapport de reconciliation JT04B
+      ansible.builtin.stat:
+        path: "{{ reconciliation_report_path }}"
+      register: reconciliation_stat
+    - name: Exiger un rapport de reconciliation regulier
+      ansible.builtin.assert:
+        that:
+          - reconciliation_stat.stat.isreg | default(false) | bool
+        fail_msg: "Rapport JT04B absent : observation SSH interdite."
+    - name: Lire le rapport JT04B
+      ansible.builtin.slurp:
+        src: "{{ reconciliation_report_path }}"
+      register: reconciliation_raw
+      no_log: true
+    - name: Decoder le rapport JT04B
+      ansible.builtin.set_fact:
+        reconciliation_report: "{{ reconciliation_raw.content | b64decode | from_json }}"
+      no_log: true
+    - name: Exiger la reconciliation du workflow courant
+      ansible.builtin.assert:
+        that:
+          - reconciliation_report.stage | default('') == 'jt04b_reconciliation'
+          - reconciliation_report.schema_version | default(0) | int == 1
+          - reconciliation_report.status | default('') == 'observation_authorized'
+          - reconciliation_report.workflow_id | default('') | string == workflow_id
+          - reconciliation_report.hostname | default('') == inventory_hostname
+          - (reconciliation_report.selected_hosts | default([]) | sort) == (ansible_play_hosts_all | sort)
+          - reconciliation_report.source_activation_status | default('') == activation_report.status
+          - reconciliation_report.target_version | default('') == activation_report.target_version
+          - reconciliation_report.default_boot_verified | default('') == 'Secondary'
+          - reconciliation_report.ssh_observation_authorized | default(false) | bool
+          - not (reconciliation_report.reboot_confirmed | default(false) | bool)
+          - not (reconciliation_report.switch_modified_by_jt04b | default(true) | bool)
+        fail_msg: "JT04B non conforme : aucun acces SSH automatique."
     - name: Marquer le preflight comme valide
       ansible.builtin.set_fact:
         jt05_preflight_ok: true
@@ -79,4 +115,4 @@
         dest: "{{ report_dir }}/wait_ssh_v05.json"
         mode: '0600'
         content: |
-          {{ {'stage': 'jt05_wait_ssh', 'status': 'ssh_port_reachable', 'workflow_id': workflow_id, 'hostname': inventory_hostname, 'selected_hosts': ansible_play_hosts_all | sort, 'ssh_port_reachable': true, 'firmware_verified': false, 'reboot_independently_verified': false, 'activation_report_status': activation_report.status, 'requires_jt06_verification': true} | to_nice_json }}
+          {{ {'stage': 'jt05_wait_ssh', 'status': 'ssh_port_reachable', 'workflow_id': workflow_id, 'hostname': inventory_hostname, 'selected_hosts': ansible_play_hosts_all | sort, 'ssh_port_reachable': true, 'firmware_verified': false, 'reboot_independently_verified': false, 'activation_report_status': activation_report.status, 'reconciliation_status': reconciliation_report.status, 'requires_jt06_verification': true} | to_nice_json }}
