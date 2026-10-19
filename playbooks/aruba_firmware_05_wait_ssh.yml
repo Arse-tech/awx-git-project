@@ -1,7 +1,7 @@
 ---
-# JT05 V05.1 - Retour SSH apres activation Secondary.
-# Ne commande jamais de reboot. Un etat JT04 ambigu bloque le workflow.
-- name: JT05 V05.1 - Attendre le retour SSH apres activation confirmee
+# JT05 V05.2 - Retour SSH apres activation Secondary.
+# Ne commande jamais de reboot. Un etat ambigu autorise uniquement une observation SSH, jamais un reboot.
+- name: JT05 V05.2 - Attendre le retour SSH apres activation confirmee
   hosts: all
   gather_facts: false
   strategy: linear
@@ -13,7 +13,7 @@
     archive_root: /awx-storage/reports/aruba
     workflow_id: "{{ awx_workflow_job_id | default('', true) | string }}"
     report_dir: "{{ archive_root }}/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
-    activation_report_path: "{{ report_dir }}/activation_v05.json"
+    activation_report_path: "{{ report_dir }}/activation_v047.json"
   tasks:
     - name: Verifier contexte et perimetre
       ansible.builtin.assert:
@@ -45,19 +45,19 @@
       ansible.builtin.set_fact:
         activation_report: "{{ activation_raw.content | b64decode | from_json }}"
       no_log: true
-    - name: Refuser toute activation non confirmee ou ambigue
+    - name: Verifier la tentative JT04 sans presumer un reboot
       ansible.builtin.assert:
         that:
           - activation_report.stage | default('') == 'jt04_activation'
           - activation_report.workflow_id | default('') | string == workflow_id
           - activation_report.hostname | default('') == inventory_hostname
           - (activation_report.selected_hosts | default([]) | sort) == (ansible_play_hosts_all | sort)
-          - activation_report.status | default('') == 'reboot_requested'
-          - activation_report.activation_executed | default(false) | bool
-          - activation_report.reboot_requested | default(false) | bool
+          - activation_report.status | default('') in ['reboot_dispatch_uncertain', 'reboot_command_returned']
+          - activation_report.target_version | default('') == aruba_firmware_target.version
+          - activation_report.default_boot_verified | default('') == 'Secondary'
+          - activation_report.manual_reconciliation_required | default(false) | bool
         fail_msg: >-
-          Rapport JT04 absent, non confirme ou ambigu. Ne pas relancer JT04.
-          Examiner l'etat reel du switch et traiter manuellement l'incident.
+          Rapport JT04 non eligible a une observation SSH. Ne pas relancer JT04.
     - name: Marquer le preflight comme valide
       ansible.builtin.set_fact:
         jt05_preflight_ok: true
@@ -79,4 +79,4 @@
         dest: "{{ report_dir }}/wait_ssh_v05.json"
         mode: '0600'
         content: |
-          {{ {'stage': 'jt05_wait_ssh', 'status': 'ssh_port_reachable', 'workflow_id': workflow_id, 'hostname': inventory_hostname, 'selected_hosts': ansible_play_hosts_all | sort, 'ssh_port_reachable': true, 'firmware_verified': false, 'reboot_independently_verified': false} | to_nice_json }}
+          {{ {'stage': 'jt05_wait_ssh', 'status': 'ssh_port_reachable', 'workflow_id': workflow_id, 'hostname': inventory_hostname, 'selected_hosts': ansible_play_hosts_all | sort, 'ssh_port_reachable': true, 'firmware_verified': false, 'reboot_independently_verified': false, 'activation_report_status': activation_report.status, 'requires_jt06_verification': true} | to_nice_json }}
