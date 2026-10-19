@@ -1,0 +1,134 @@
+---
+# JT07 V07.0 - Preflight Primary, strictement en lecture seule.
+# Aucune copie TFTP, aucun boot set-default, aucun reboot.
+- name: JT07 - Preflight de la future mise a jour Primary
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  serial: 1
+  any_errors_fatal: true
+  vars_files:
+    - ../vars/aruba_firmware_devices.yml
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 120
+    workflow_id: "{{ awx_workflow_job_id | default('', true) | string }}"
+    report_dir: "/awx-storage/reports/aruba/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
+    postcheck_path: "{{ report_dir }}/postcheck_v06.json"
+    primary_preflight_path: "{{ report_dir }}/primary_preflight_v07.json"
+  tasks:
+    - name: Verrouiller le perimetre et le mode lecture seule
+      ansible.builtin.assert:
+        that:
+          - workflow_id is match('^[0-9]+$')
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname == 'CSE-LAB-B01-ARU-SW-2'
+          - ansible_limit is defined
+          - (ansible_limit | default('') | trim) == inventory_hostname
+          - inventory_hostname in (jt04_allowed_hosts | default([]))
+          - inventory_hostname in aruba_firmware_devices
+          - device_vendor | default('') | lower == 'aruba'
+          - jt07_execution_mode | default('preflight') == 'preflight'
+          - aruba_firmware_target.version == 'WC.16.11.0030'
+        fail_msg: "JT07 refuse : perimetre, version ou mode non conforme."
+
+    - name: Verifier NFS sur le controleur
+      ansible.builtin.command: mountpoint -q /awx-storage
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      changed_when: false
+
+    - name: Verifier la preuve JT06
+      ansible.builtin.stat:
+        path: "{{ postcheck_path }}"
+      register: jt07_postcheck_stat
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+
+    - name: Exiger une preuve JT06 reguliere
+      ansible.builtin.assert:
+        that:
+          - jt07_postcheck_stat.stat.isreg | default(false) | bool
+        fail_msg: "Postcheck JT06 absent : toute operation Primary est interdite."
+
+    - name: Lire la preuve JT06
+      ansible.builtin.slurp:
+        src: "{{ postcheck_path }}"
+      register: jt07_postcheck_raw
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      no_log: true
+
+    - name: Decoder la preuve JT06
+      ansible.builtin.set_fact:
+        jt07_postcheck: "{{ jt07_postcheck_raw.content | b64decode | from_json }}"
+      no_log: true
+
+    - name: Exiger le postcheck Secondary du meme workflow
+      ansible.builtin.assert:
+        that:
+          - jt07_postcheck.stage | default('') == 'jt06_postcheck'
+          - jt07_postcheck.status | default('') == 'passed'
+          - jt07_postcheck.workflow_id | default('') | string == workflow_id
+          - jt07_postcheck.hostname | default('') == inventory_hostname
+          - (jt07_postcheck.selected_hosts | default([]) | sort) == (ansible_play_hosts_all | sort)
+          - jt07_postcheck.primary | default('') == aruba_firmware_devices[inventory_hostname].primary_before
+          - jt07_postcheck.secondary | default('') == aruba_firmware_target.version
+          - jt07_postcheck.running | default('') == aruba_firmware_target.version
+          - jt07_postcheck.active_image | default('') == 'Secondary'
+          - jt07_postcheck.default_image | default('') == 'Secondary'
+          - jt07_postcheck.transition_from_primary_to_secondary_verified | default(false) | bool
+        fail_msg: "Preuve Secondary non conforme : Primary interdit."
+
+    - name: Relire la version en cours sans modification
+      ansible.netcommon.cli_command:
+        command: show version
+      register: jt07_version
+      changed_when: false
+
+    - name: Relire les deux images flash sans modification
+      ansible.netcommon.cli_command:
+        command: show flash
+      register: jt07_flash
+      changed_when: false
+
+    - name: Extraire les etats flash et boot
+      ansible.builtin.set_fact:
+        jt07_primary: "{{ jt07_flash.stdout | regex_findall('(?im)^Primary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+        jt07_secondary: "{{ jt07_flash.stdout | regex_findall('(?im)^Secondary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+        jt07_running: "{{ jt07_version.stdout | regex_findall('(?m)^\\s*(WC\\.\\d+\\.\\d+\\.\\d+)\\s*$') }}"
+        jt07_active: "{{ jt07_version.stdout | regex_findall('(?im)^Boot Image:\\s*(Primary|Secondary)\\s*$') }}"
+        jt07_default: "{{ jt07_flash.stdout | regex_findall('(?im)^Default Boot Image\\s*:\\s*(Primary|Secondary)\\s*$') }}"
+
+    - name: Exiger Secondary saine et Primary intacte maintenant
+      ansible.builtin.assert:
+        that:
+          - jt07_primary | length == 1
+          - jt07_secondary | length == 1
+          - jt07_running | length == 1
+          - jt07_active | length == 1
+          - jt07_default | length == 1
+          - jt07_primary[0] == aruba_firmware_devices[inventory_hostname].primary_before
+          - jt07_secondary[0] == aruba_firmware_target.version
+          - jt07_running[0] == aruba_firmware_target.version
+          - jt07_active[0] == 'Secondary'
+          - jt07_default[0] == 'Secondary'
+        fail_msg: "Etat actuel incompatible avec une preparation Primary : STOP."
+
+    - name: Archiver le preflight Primary sans autoriser une ecriture
+      ansible.builtin.copy:
+        dest: "{{ primary_preflight_path }}"
+        mode: '0600'
+        content: |
+          {{ {'stage':'jt07_primary_preflight','status':'read_only_passed','workflow_id':workflow_id,'hostname':inventory_hostname,'selected_hosts':ansible_play_hosts_all | sort,'primary':jt07_primary[0],'secondary':jt07_secondary[0],'running':jt07_running[0],'active_image':jt07_active[0],'default_image':jt07_default[0],'primary_write_authorized':false,'reboot_requested':false,'device_modified':false} | to_nice_json }}
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+
+    - name: Afficher le resultat de preparation
+      ansible.builtin.debug:
+        msg: "JT07 preflight OK : Secondary active, Primary intacte. Aucune ecriture ni reboot autorises."
