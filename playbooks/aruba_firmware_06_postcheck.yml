@@ -1,7 +1,7 @@
 ---
-# JT06 V06.1 - Postcheck apres activation Secondary, lecture seule.
+# JT06 V06.2 - Postcheck apres activation Secondary, lecture seule.
 # Valide firmware/boot; ne constitue pas une preuve independante de reboot.
-- name: JT06 V06.1 - Verifier firmware Secondary en SSH
+- name: JT06 V06.2 - Verifier firmware Secondary en SSH
   hosts: all
   gather_facts: false
   strategy: linear
@@ -46,6 +46,8 @@
           - (wait_report.selected_hosts | default([]) | sort) == (ansible_play_hosts_all | sort)
           - wait_report.status | default('') == 'ssh_port_reachable'
           - wait_report.ssh_port_reachable | default(false) | bool
+          - wait_report.activation_report_status | default('') in ['reboot_dispatch_uncertain', 'reboot_command_returned']
+          - wait_report.requires_jt06_verification | default(false) | bool
     - name: Lire show version
       ansible.netcommon.cli_command:
         command: show version
@@ -92,7 +94,7 @@
         dest: "{{ report_dir }}/postcheck_v06.json"
         mode: '0600'
         content: |
-          {{ {'stage': 'jt06_postcheck', 'status': 'passed', 'workflow_id': workflow_id, 'hostname': inventory_hostname, 'selected_hosts': ansible_play_hosts_all | sort, 'primary': primary_after[0], 'secondary': secondary_after[0], 'running': running_after[0], 'active_image': active_after[0], 'default_image': default_after[0], 'reboot_executed_by_jt06': false, 'reboot_independently_verified': false} | to_nice_json }}
+          {{ {'stage': 'jt06_postcheck', 'status': 'passed', 'workflow_id': workflow_id, 'hostname': inventory_hostname, 'selected_hosts': ansible_play_hosts_all | sort, 'primary': primary_after[0], 'secondary': secondary_after[0], 'running': running_after[0], 'active_image': active_after[0], 'default_image': default_after[0], 'reboot_executed_by_jt06': false, 'transition_from_primary_to_secondary_verified': true, 'reboot_independently_verified': false, 'activation_report_status': wait_report.activation_report_status} | to_nice_json }}
       delegate_to: localhost
       vars:
         ansible_connection: local
