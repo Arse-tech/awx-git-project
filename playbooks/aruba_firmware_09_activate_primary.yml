@@ -1,0 +1,181 @@
+---
+# JT09 V09.0 - Activation Primary, verrouillee par defaut.
+# Jamais de second reboot automatique si le premier envoi est incertain.
+- name: JT09 - Controle et activation eventuelle Primary
+  hosts: all
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  vars_files:
+    - ../vars/aruba_firmware_devices.yml
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    workflow_id: "{{ awx_workflow_job_id | default('', true) | string }}"
+    report_dir: "/awx-storage/reports/aruba/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
+    target_version: WC.16.11.0030
+    activation_mode: "{{ jt09_execution_mode | default('verify_only') | lower }}"
+    activation_path: "{{ report_dir }}/activation_primary_v09.json"
+  tasks:
+    - name: Verrouiller le perimetre SW-2 et le workflow
+      ansible.builtin.assert:
+        that:
+          - workflow_id is match('^[0-9]+$')
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname == 'CSE-LAB-B01-ARU-SW-2'
+          - ansible_limit is defined
+          - (ansible_limit | default('') | trim) == inventory_hostname
+          - inventory_hostname in (jt04_allowed_hosts | default([]))
+          - inventory_hostname in aruba_firmware_devices
+          - device_vendor | default('') | lower == 'aruba'
+          - aruba_firmware_target.version == target_version
+    - name: Exiger le NFS
+      ansible.builtin.command: mountpoint -q /awx-storage
+      delegate_to: localhost
+      vars: {ansible_connection: local}
+      changed_when: false
+    - name: Exiger un mode connu
+      ansible.builtin.assert:
+        that:
+          - activation_mode in ['verify_only', 'activate']
+    - name: Verifier la preuve JT08
+      ansible.builtin.stat: {path: "{{ report_dir }}/primary_upgrade_v08.json"}
+      register: jt08_stat
+      delegate_to: localhost
+      vars: {ansible_connection: local}
+    - name: Exiger un rapport JT08
+      ansible.builtin.assert:
+        that:
+          - jt08_stat.stat.isreg | default(false) | bool
+        fail_msg: "JT08 en simulation ou absent : aucune activation possible."
+    - name: Lire JT08
+      ansible.builtin.slurp: {src: "{{ report_dir }}/primary_upgrade_v08.json"}
+      register: jt08_raw
+      delegate_to: localhost
+      vars: {ansible_connection: local}
+      no_log: true
+    - name: Decoder JT08
+      ansible.builtin.set_fact:
+        jt08: "{{ jt08_raw.content | b64decode | from_json }}"
+      no_log: true
+    - name: Exiger la verification Primary du meme workflow
+      ansible.builtin.assert:
+        that:
+          - jt08.stage | default('') == 'jt08_primary_upgrade'
+          - jt08.status | default('') == 'primary_image_verified'
+          - jt08.workflow_id | default('') | string == workflow_id
+          - jt08.hostname | default('') == inventory_hostname
+          - (jt08.selected_hosts | default([]) | sort) == (ansible_play_hosts_all | sort)
+          - jt08.target_version | default('') == target_version
+          - jt08.primary | default('') == target_version
+          - jt08.secondary | default('') == target_version
+          - jt08.active_image | default('') == 'Secondary'
+          - jt08.default_image | default('') == 'Secondary'
+          - jt08.primary_version_verified | default(false) | bool
+          - not (jt08.reboot_requested | default(true) | bool)
+    - name: Lire show version
+      ansible.netcommon.cli_command: {command: show version}
+      register: live_version
+      changed_when: false
+    - name: Lire show flash
+      ansible.netcommon.cli_command: {command: show flash}
+      register: live_flash
+      changed_when: false
+    - name: Extraire les images et le boot
+      ansible.builtin.set_fact:
+        primary_live: "{{ live_flash.stdout | regex_findall('(?im)^Primary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+        secondary_live: "{{ live_flash.stdout | regex_findall('(?im)^Secondary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+        running_live: "{{ live_version.stdout | regex_findall('(?m)^\\s*(WC\\.\\d+\\.\\d+\\.\\d+)\\s*$') }}"
+        active_live: "{{ live_version.stdout | regex_findall('(?im)^Boot Image:\\s*(Primary|Secondary)\\s*$') }}"
+        default_live: "{{ live_flash.stdout | regex_findall('(?im)^Default Boot Image\\s*:\\s*(Primary|Secondary)\\s*$') }}"
+    - name: Exiger une seule valeur par champ
+      ansible.builtin.assert:
+        that:
+          - primary_live | length == 1
+          - secondary_live | length == 1
+          - running_live | length == 1
+          - active_live | length == 1
+          - default_live | length == 1
+    - name: Exiger les deux images cibles et Secondary active
+      ansible.builtin.assert:
+        that:
+          - primary_live[0] == target_version
+          - secondary_live[0] == target_version
+          - running_live[0] == target_version
+          - active_live[0] == 'Secondary'
+          - default_live[0] == 'Secondary'
+        fail_msg: "JT09 refuse : Primary/Secondary ou boot inattendu."
+    - name: Mode verification uniquement
+      ansible.builtin.debug:
+        msg: "JT09 verify_only OK : aucune activation, aucun reboot."
+      when: activation_mode == 'verify_only'
+    - name: Activation Primary strictement autorisee
+      when: activation_mode == 'activate'
+      block:
+        - name: Exiger les autorisations et le dialogue confirme
+          ansible.builtin.assert:
+            that:
+              - jt09_activation_authorized | default(false) | bool
+              - jt09_reboot_risk_accepted | default(false) | bool
+              - jt09_primary_reboot_prompt_validated | default(false) | bool
+              - jt09_primary_reboot_prompt_regex is defined
+              - jt09_primary_reboot_prompt_regex | default('') | length > 10
+            fail_msg: "JT09 : reboot Primary interdit sans validation explicite."
+        - name: Interdire toute tentative deja enregistree
+          ansible.builtin.stat: {path: "{{ activation_path }}"}
+          register: prior_activation
+          delegate_to: localhost
+          vars: {ansible_connection: local}
+        - name: Verrou anti-rejeu
+          ansible.builtin.assert:
+            that:
+              - not (prior_activation.stat.exists | default(false) | bool)
+            fail_msg: "Tentative JT09 existante : reconciliation manuelle obligatoire."
+        - name: Archiver le debut de tentative avant changement du boot
+          ansible.builtin.copy:
+            dest: "{{ activation_path }}"
+            mode: '0600'
+            force: false
+            content: |
+              {{ {'stage':'jt09_primary_activation','status':'activation_started','workflow_id':workflow_id,'hostname':inventory_hostname,'selected_hosts':ansible_play_hosts_all | sort,'target_version':target_version,'reboot_confirmed':false} | to_nice_json }}
+          delegate_to: localhost
+          vars: {ansible_connection: local}
+        - name: Definir Primary comme boot par defaut
+          ansible.netcommon.cli_command: {command: boot set-default flash primary}
+          changed_when: true
+        - name: Relire le boot par defaut
+          ansible.netcommon.cli_command: {command: show flash}
+          register: flash_after_default
+          changed_when: false
+        - name: Extraire le boot par defaut confirme
+          ansible.builtin.set_fact:
+            default_after: "{{ flash_after_default.stdout | regex_findall('(?im)^Default Boot Image\\s*:\\s*(Primary|Secondary)\\s*$') }}"
+        - name: Exiger Primary comme boot par defaut
+          ansible.builtin.assert:
+            that:
+              - default_after | length == 1
+              - default_after[0] == 'Primary'
+        - name: Archiver le statut incertain AVANT reboot
+          ansible.builtin.copy:
+            dest: "{{ activation_path }}"
+            mode: '0600'
+            content: |
+              {{ {'stage':'jt09_primary_activation','status':'reboot_dispatch_uncertain','workflow_id':workflow_id,'hostname':inventory_hostname,'selected_hosts':ansible_play_hosts_all | sort,'target_version':target_version,'default_boot_verified':'Primary','reboot_confirmed':false,'manual_reconciliation_required':true} | to_nice_json }}
+          delegate_to: localhost
+          vars: {ansible_connection: local}
+        - name: Envoyer UNE SEULE demande de reboot Primary
+          ansible.netcommon.cli_command:
+            command: boot system flash primary
+            prompt: ["{{ jt09_primary_reboot_prompt_regex }}"]
+            answer: ['y']
+            check_all: true
+          vars: {ansible_command_timeout: 180}
+          changed_when: true
+        - name: Archiver le retour de commande sans presumer un reboot
+          ansible.builtin.copy:
+            dest: "{{ activation_path }}"
+            mode: '0600'
+            content: |
+              {{ {'stage':'jt09_primary_activation','status':'reboot_command_returned','workflow_id':workflow_id,'hostname':inventory_hostname,'selected_hosts':ansible_play_hosts_all | sort,'target_version':target_version,'default_boot_verified':'Primary','reboot_confirmed':false,'manual_reconciliation_required':true} | to_nice_json }}
+          delegate_to: localhost
+          vars: {ansible_connection: local}
