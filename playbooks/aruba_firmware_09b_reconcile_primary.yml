@@ -1,0 +1,70 @@
+---
+# JT09B V01.0 - Reconciliation locale, aucune commande switch.
+- name: JT09B - Reconciliation tentative de reboot Primary
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  any_errors_fatal: true
+  vars_files:
+    - ../vars/aruba_firmware_devices.yml
+  vars:
+    ansible_connection: local
+    workflow_id: "{{ awx_workflow_job_id | default('', true) | string }}"
+    report_dir: "/awx-storage/reports/aruba/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
+    activation_path: "{{ report_dir }}/activation_primary_v09.json"
+    reconciliation_path: "{{ report_dir }}/reconciliation_primary_v09b.json"
+    target_version: 'WC.16.11.0030'
+  tasks:
+    - name: Exiger SW-2 seul et le workflow AWX limite
+      ansible.builtin.assert:
+        that:
+          - workflow_id is match('^[0-9]+$')
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname == 'CSE-LAB-B01-ARU-SW-2'
+          - ansible_limit is defined
+          - (ansible_limit | default('') | trim) == inventory_hostname
+          - inventory_hostname in (jt04_allowed_hosts | default([]))
+          - device_vendor | default('') | lower == 'aruba'
+          - aruba_firmware_target.version == target_version
+    - name: Exiger montage NFS
+      ansible.builtin.command: mountpoint -q /awx-storage
+      changed_when: false
+    - name: Examiner le rapport JT09
+      ansible.builtin.stat:
+        path: "{{ activation_path }}"
+      register: activation_stat
+    - name: Exiger un rapport regulier
+      ansible.builtin.assert:
+        that:
+          - activation_stat.stat.isreg | default(false) | bool
+    - name: Lire JT09
+      ansible.builtin.slurp:
+        src: "{{ activation_path }}"
+      register: activation_raw
+      no_log: true
+    - name: Decoder JT09
+      ansible.builtin.set_fact:
+        activation: "{{ activation_raw.content | b64decode | from_json }}"
+      no_log: true
+    - name: Refuser toute tentative non admissible
+      ansible.builtin.assert:
+        that:
+          - activation.stage | default('') == 'jt09_primary_activation'
+          - activation.workflow_id | default('') | string == workflow_id
+          - activation.hostname | default('') == inventory_hostname
+          - (activation.selected_hosts | default([]) | sort) == (ansible_play_hosts_all | sort)
+          - activation.status | default('') in ['reboot_dispatch_uncertain', 'reboot_command_returned']
+          - activation.target_version | default('') == target_version
+          - activation.default_boot_verified | default('') == 'Primary'
+          - activation.manual_reconciliation_required | default(false) | bool
+          - not (activation.reboot_confirmed | default(true) | bool)
+        fail_msg: "JT09B refuse : aucun envoi de reboot Primary admissible. Ne pas rejouer JT09."
+    - name: Ecrire la permission d'observation uniquement
+      ansible.builtin.copy:
+        dest: "{{ reconciliation_path }}"
+        mode: '0600'
+        content: |
+          {{ {'schema_version':1,'stage':'jt09b_primary_reconciliation','status':'observation_authorized','workflow_id':workflow_id,'hostname':inventory_hostname,'selected_hosts':ansible_play_hosts_all | sort,'source_activation_status':activation.status,'target_version':target_version,'default_boot_verified':'Primary','ssh_observation_authorized':true,'reboot_confirmed':false,'switch_modified_by_jt09b':false} | to_nice_json }}
+    - name: Afficher la conclusion
+      ansible.builtin.debug:
+        msg: "JT09B : observation SSH autorisee, reboot non confirme, aucune commande envoyee."

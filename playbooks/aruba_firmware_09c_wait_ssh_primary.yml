@@ -1,0 +1,98 @@
+---
+# JT09C V01.0 - Observation TCP SSH apres tentative JT09; aucun reboot.
+- name: JT09C - Attendre accessibilite SSH apres tentative Primary
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  any_errors_fatal: true
+  vars_files:
+    - ../vars/aruba_firmware_devices.yml
+  vars:
+    ansible_connection: local
+    workflow_id: "{{ awx_workflow_job_id | default('', true) | string }}"
+    report_dir: "/awx-storage/reports/aruba/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
+    activation_path: "{{ report_dir }}/activation_primary_v09.json"
+    reconciliation_path: "{{ report_dir }}/reconciliation_primary_v09b.json"
+    wait_report_path: "{{ report_dir }}/wait_ssh_primary_v09c.json"
+    target_version: 'WC.16.11.0030'
+  tasks:
+    - name: Verrouiller SW-2 et le contexte workflow
+      ansible.builtin.assert:
+        that:
+          - workflow_id is match('^[0-9]+$')
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname == 'CSE-LAB-B01-ARU-SW-2'
+          - ansible_limit is defined
+          - (ansible_limit | default('') | trim) == inventory_hostname
+          - inventory_hostname in (jt04_allowed_hosts | default([]))
+          - device_vendor | default('') | lower == 'aruba'
+          - aruba_firmware_target.version == target_version
+          - ansible_host is defined
+    - name: Exiger NFS
+      ansible.builtin.command: mountpoint -q /awx-storage
+      changed_when: false
+    - name: Examiner les deux rapports
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ activation_path }}"
+        - "{{ reconciliation_path }}"
+      register: report_stats
+    - name: Exiger les deux rapports reguliers
+      ansible.builtin.assert:
+        that:
+          - (report_stats.results | selectattr('stat.isreg', 'defined') | selectattr('stat.isreg', 'equalto', true) | list | length) == 2
+    - name: Lire les deux rapports
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ activation_path }}"
+        - "{{ reconciliation_path }}"
+      register: report_raw
+      no_log: true
+    - name: Decoder les rapports
+      ansible.builtin.set_fact:
+        activation: "{{ report_raw.results[0].content | b64decode | from_json }}"
+        reconciliation: "{{ report_raw.results[1].content | b64decode | from_json }}"
+      no_log: true
+    - name: Verifier les contrats JT09 et JT09B
+      ansible.builtin.assert:
+        that:
+          - activation.stage | default('') == 'jt09_primary_activation'
+          - activation.workflow_id | default('') | string == workflow_id
+          - activation.hostname | default('') == inventory_hostname
+          - (activation.selected_hosts | default([]) | sort) == (ansible_play_hosts_all | sort)
+          - activation.status | default('') in ['reboot_dispatch_uncertain', 'reboot_command_returned']
+          - activation.target_version | default('') == target_version
+          - activation.default_boot_verified | default('') == 'Primary'
+          - reconciliation.schema_version | default(0) | int == 1
+          - reconciliation.stage | default('') == 'jt09b_primary_reconciliation'
+          - reconciliation.status | default('') == 'observation_authorized'
+          - reconciliation.workflow_id | default('') | string == workflow_id
+          - reconciliation.hostname | default('') == inventory_hostname
+          - (reconciliation.selected_hosts | default([]) | sort) == (ansible_play_hosts_all | sort)
+          - reconciliation.source_activation_status | default('') == activation.status
+          - reconciliation.target_version | default('') == target_version
+          - reconciliation.default_boot_verified | default('') == 'Primary'
+          - reconciliation.ssh_observation_authorized | default(false) | bool
+          - not (reconciliation.reboot_confirmed | default(true) | bool)
+          - not (reconciliation.switch_modified_by_jt09b | default(true) | bool)
+        fail_msg: "JT09C refuse : provenance ou autorisation d'observation invalide."
+    - name: Attendre ouverture TCP SSH
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ ansible_port | default(22) | int }}"
+        state: started
+        connect_timeout: 5
+        delay: 20
+        sleep: 10
+        timeout: 900
+    - name: Archiver uniquement accessibilite TCP
+      ansible.builtin.copy:
+        dest: "{{ wait_report_path }}"
+        mode: '0600'
+        content: |
+          {{ {'schema_version':1,'stage':'jt09c_wait_ssh_primary','status':'ssh_port_reachable','workflow_id':workflow_id,'hostname':inventory_hostname,'selected_hosts':ansible_play_hosts_all | sort,'ssh_port_reachable':true,'firmware_verified':false,'reboot_independently_verified':false,'requires_jt10_verification':true,'source_activation_status':activation.status} | to_nice_json }}
+    - name: Afficher la conclusion
+      ansible.builtin.debug:
+        msg: "JT09C : port SSH accessible. JT10 doit encore verifier le firmware et le boot Primary."
