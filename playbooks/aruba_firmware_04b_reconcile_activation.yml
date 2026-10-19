@@ -1,26 +1,12 @@
-
 ---
-# ============================================================
-# Aruba 2930F - JT04B V01.0
-# Reconciliation de l'activation Secondary
-#
-# Lecture locale des rapports JT04 uniquement.
-# Aucune connexion SSH.
-# Aucune modification du switch.
-# Aucun redemarrage.
-#
-# Un rapport de tentative ne prouve PAS un redemarrage.
-# ============================================================
-
+# Aruba 2930F - JT04B V01.1 - Reconciliation locale, sans SSH ni reboot
 - name: JT04B - Reconciliation activation Secondary
   hosts: all
   gather_facts: false
   strategy: linear
   any_errors_fatal: true
-
   vars_files:
     - ../vars/aruba_firmware_devices.yml
-
   vars:
     ansible_connection: local
     archive_root: /awx-storage/reports/aruba
@@ -28,9 +14,7 @@
     report_dir: "{{ archive_root }}/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
     activation_report_path: "{{ report_dir }}/activation_v047.json"
     reconciliation_report_path: "{{ report_dir }}/reconciliation_v01.json"
-
   tasks:
-
     - name: Verifier le contexte AWX et le Limit
       ansible.builtin.assert:
         that:
@@ -38,93 +22,63 @@
           - ansible_limit is defined
           - (ansible_limit | default('') | trim) is match('^[A-Za-z0-9_.-]+([,:][A-Za-z0-9_.-]+)*$')
           - (ansible_limit | default('') | regex_findall('[^,:]+') | unique | sort | list) == (ansible_play_hosts_all | sort)
+          - ansible_play_hosts_all | length == 1
           - inventory_hostname == 'CSE-LAB-B01-ARU-SW-2'
           - inventory_hostname in (jt04_allowed_hosts | default([]))
-          - inventory_hostname in aruba_firmware_devices
           - device_vendor | default('') | lower == 'aruba'
         fail_msg: "JT04B refuse : contexte AWX, Limit ou switch non autorise."
-
     - name: Verifier le montage NFS
       ansible.builtin.command:
         cmd: mountpoint -q /awx-storage
       changed_when: false
-
     - name: Verifier la presence du rapport JT04
       ansible.builtin.stat:
         path: "{{ activation_report_path }}"
       register: activation_stat
-
     - name: Exiger un rapport JT04 regulier
       ansible.builtin.assert:
         that:
-          - activation_stat.stat.exists | default(false) | bool
           - activation_stat.stat.isreg | default(false) | bool
         fail_msg: "Rapport JT04 absent : reconciliation refusee."
-
     - name: Lire le rapport JT04
       ansible.builtin.slurp:
         src: "{{ activation_report_path }}"
       register: activation_raw
       no_log: true
-
     - name: Decoder le rapport JT04
       ansible.builtin.set_fact:
         activation_report: "{{ activation_raw.content | b64decode | from_json }}"
       no_log: true
-
     - name: Verifier la provenance et la tentative
       ansible.builtin.assert:
         that:
           - activation_report.stage | default('') == 'jt04_activation'
           - activation_report.workflow_id | default('') | string == workflow_id
           - activation_report.hostname | default('') == inventory_hostname
-          - activation_report.selected_hosts | default([]) | sort == ansible_play_hosts_all | sort
+          - (activation_report.selected_hosts | default([]) | sort) == (ansible_play_hosts_all | sort)
           - activation_report.status | default('') in ['reboot_dispatch_uncertain', 'reboot_command_returned']
-          - activation_report.activation_executed | default(false) | bool
-        fail_msg: >-
-          Rapport JT04 non conforme ou aucune tentative d'activation
-          admissible. Reconciliation refusee.
-
+          - activation_report.default_boot_verified | default('') == 'Secondary'
+          - activation_report.target_version | default('') == 'WC.16.11.0030'
+          - activation_report.manual_reconciliation_required | default(false) | bool
+          - not (activation_report.reboot_confirmed | default(false) | bool)
+        fail_msg: "Rapport JT04 non conforme ou tentative non admissible. Aucun reboot automatique."
     - name: Marquer la reconciliation locale validee
       ansible.builtin.set_fact:
         jt04b_reconciliation_ok: true
-
     - name: Barriere globale de reconciliation
       ansible.builtin.assert:
         that:
-          - >-
-            (ansible_play_hosts_all
-             | map('extract', hostvars, 'jt04b_reconciliation_ok')
-             | select('equalto', true)
-             | list | length) == (ansible_play_hosts_all | length)
-        fail_msg: "Reconciliation incomplete : lot bloque."
-
+          - (ansible_play_hosts_all | map('extract', hostvars, 'jt04b_reconciliation_ok') | select('equalto', true) | list | length) == (ansible_play_hosts_all | length)
     - name: Enregistrer le rapport de reconciliation
       ansible.builtin.copy:
         dest: "{{ reconciliation_report_path }}"
         mode: '0600'
         content: |
-          {{ {
-            'schema_version': 1,
-            'stage': 'jt04b_reconciliation',
-            'status': 'observation_authorized',
-            'workflow_id': workflow_id,
-            'hostname': inventory_hostname,
-            'selected_hosts': ansible_play_hosts_all | sort,
-            'source_activation_status': activation_report.status,
-            'reboot_confirmed': false,
-            'ssh_observation_authorized': true,
-            'switch_modified_by_jt04b': false
-          } | to_nice_json }}
-
+          {{ {'schema_version': 1, 'stage': 'jt04b_reconciliation', 'status': 'observation_authorized', 'workflow_id': workflow_id, 'hostname': inventory_hostname, 'selected_hosts': ansible_play_hosts_all | sort, 'source_activation_status': activation_report.status, 'target_version': activation_report.target_version, 'default_boot_verified': activation_report.default_boot_verified, 'reboot_confirmed': false, 'ssh_observation_authorized': true, 'switch_modified_by_jt04b': false} | to_nice_json }}
     - name: Afficher le resultat
       ansible.builtin.debug:
         msg:
           - "JT04B : reconciliation locale validee"
           - "Switch : {{ inventory_hostname }}"
-          - "Workflow : {{ workflow_id }}"
           - "Etat JT04 : {{ activation_report.status }}"
-          - "Observation SSH : autorisee"
-          - "Redemarrage confirme : NON"
-          - "Modification : aucune"
-
+          - "Observation SSH : autorisee; reboot non confirme"
