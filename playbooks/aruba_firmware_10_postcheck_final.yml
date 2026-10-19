@@ -1,1 +1,132 @@
 
+---
+# JT10 V10.0 - Controle final Primary, lecture seule.
+# Necessite une preuve de tentative JT09 et l'observation effective du boot Primary.
+- name: JT10 - Postcheck final des images Primary et Secondary
+  hosts: all
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  vars_files:
+    - ../vars/aruba_firmware_devices.yml
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    workflow_id: "{{ awx_workflow_job_id | default('', true) | string }}"
+    report_dir: "/awx-storage/reports/aruba/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
+    target_version: WC.16.11.0030
+    activation_path: "{{ report_dir }}/activation_primary_v09.json"
+    final_path: "{{ report_dir }}/postcheck_final_v10.json"
+  tasks:
+    - name: Verrouiller le perimetre SW-2 et le workflow
+      ansible.builtin.assert:
+        that:
+          - workflow_id is match('^[0-9]+$')
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname == 'CSE-LAB-B01-ARU-SW-2'
+          - ansible_limit is defined
+          - (ansible_limit | default('') | trim) == inventory_hostname
+          - inventory_hostname in (jt04_allowed_hosts | default([]))
+          - inventory_hostname in aruba_firmware_devices
+          - device_vendor | default('') | lower == 'aruba'
+          - aruba_firmware_target.version == target_version
+
+    - name: Exiger le NFS
+      ansible.builtin.command: mountpoint -q /awx-storage
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      changed_when: false
+
+    - name: Verifier la preuve JT09
+      ansible.builtin.stat:
+        path: "{{ activation_path }}"
+      register: activation_stat
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+
+    - name: Exiger une tentative JT09 archivée
+      ansible.builtin.assert:
+        that:
+          - activation_stat.stat.isreg | default(false) | bool
+
+    - name: Lire JT09
+      ansible.builtin.slurp:
+        src: "{{ activation_path }}"
+      register: activation_raw
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+      no_log: true
+
+    - name: Decoder JT09
+      ansible.builtin.set_fact:
+        activation: "{{ activation_raw.content | b64decode | from_json }}"
+      no_log: true
+
+    - name: Verifier provenance et tentative de reboot Primary
+      ansible.builtin.assert:
+        that:
+          - activation.stage | default('') == 'jt09_primary_activation'
+          - activation.workflow_id | default('') | string == workflow_id
+          - activation.hostname | default('') == inventory_hostname
+          - (activation.selected_hosts | default([]) | sort) == (ansible_play_hosts_all | sort)
+          - activation.status | default('') in ['reboot_dispatch_uncertain', 'reboot_command_returned']
+          - activation.target_version | default('') == target_version
+          - activation.default_boot_verified | default('') == 'Primary'
+        fail_msg: "Aucune tentative JT09 admissible : postcheck refuse."
+
+    - name: Lire show version
+      ansible.netcommon.cli_command:
+        command: show version
+      register: live_version
+      changed_when: false
+
+    - name: Lire show flash
+      ansible.netcommon.cli_command:
+        command: show flash
+      register: live_flash
+      changed_when: false
+
+    - name: Extraire les images et le boot
+      ansible.builtin.set_fact:
+        primary_live: "{{ live_flash.stdout | regex_findall('(?im)^Primary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+        secondary_live: "{{ live_flash.stdout | regex_findall('(?im)^Secondary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+        running_live: "{{ live_version.stdout | regex_findall('(?m)^\\s*(WC\\.\\d+\\.\\d+\\.\\d+)\\s*$') }}"
+        active_live: "{{ live_version.stdout | regex_findall('(?im)^Boot Image:\\s*(Primary|Secondary)\\s*$') }}"
+        default_live: "{{ live_flash.stdout | regex_findall('(?im)^Default Boot Image\\s*:\\s*(Primary|Secondary)\\s*$') }}"
+
+    - name: Exiger une seule valeur par champ
+      ansible.builtin.assert:
+        that:
+          - primary_live | length == 1
+          - secondary_live | length == 1
+          - running_live | length == 1
+          - active_live | length == 1
+          - default_live | length == 1
+
+    - name: Exiger Primary active, les deux images cibles et boot Primary
+      ansible.builtin.assert:
+        that:
+          - primary_live[0] == target_version
+          - secondary_live[0] == target_version
+          - running_live[0] == target_version
+          - active_live[0] == 'Primary'
+          - default_live[0] == 'Primary'
+        fail_msg: "JT10 STOP : transition Primary non observee."
+
+    - name: Enregistrer le postcheck final
+      ansible.builtin.copy:
+        dest: "{{ final_path }}"
+        mode: '0600'
+        content: |
+          {{ {'stage':'jt10_final_postcheck','status':'passed','workflow_id':workflow_id,'hostname':inventory_hostname,'selected_hosts':ansible_play_hosts_all | sort,'primary':primary_live[0],'secondary':secondary_live[0],'running':running_live[0],'active_image':active_live[0],'default_image':default_live[0],'transition_to_primary_observed':true,'reboot_independently_verified':false,'device_modified_by_jt10':false} | to_nice_json }}
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+
+    - name: Afficher le bilan
+      ansible.builtin.debug:
+        msg: "JT10 OK : Primary active, deux images cible. Reboot non independamment prouve."
+
