@@ -1,6 +1,7 @@
 ---
-# JT06 - Postcheck reel en SSH. Aucun changement sur le switch.
-- name: JT06 - Verifier les versions apres redemarrage
+# JT06 V06.1 - Postcheck apres activation Secondary, lecture seule.
+# Valide firmware/boot; ne constitue pas une preuve independante de reboot.
+- name: JT06 V06.1 - Verifier firmware Secondary en SSH
   hosts: all
   gather_facts: false
   strategy: linear
@@ -14,15 +15,17 @@
     workflow_id: "{{ awx_workflow_job_id | default('', true) | string }}"
     report_dir: "/awx-storage/reports/aruba/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
   tasks:
-    - name: Exiger un contexte AWX et un Limit explicite
+    - name: Verifier le contexte AWX et le perimetre
       ansible.builtin.assert:
         that:
           - workflow_id is match('^[0-9]+$')
           - ansible_limit is defined
-          - (ansible_limit | default('') | regex_findall('[^,:]+') | unique | sort | list) == (ansible_play_hosts_all | sort)
+          - (ansible_limit | default('') | trim) is match('^[A-Za-z0-9_.-]+([,:][A-Za-z0-9_.-]+)*$')
+          - (ansible_limit | regex_findall('[^,:]+') | unique | sort | list) == (ansible_play_hosts_all | sort)
           - inventory_hostname in (jt04_allowed_hosts | default([]))
+          - inventory_hostname in aruba_firmware_devices
           - device_vendor | default('') | lower == 'aruba'
-    - name: Lire la preuve de retour SSH JT05
+    - name: Lire la preuve JT05 sur NFS
       ansible.builtin.slurp:
         src: "{{ report_dir }}/wait_ssh_v05.json"
       register: wait_raw
@@ -30,18 +33,19 @@
       vars:
         ansible_connection: local
       no_log: true
-    - name: Decoder la preuve JT05
+    - name: Decoder le rapport JT05
       ansible.builtin.set_fact:
         wait_report: "{{ wait_raw.content | b64decode | from_json }}"
       no_log: true
-    - name: Exiger le retour SSH du workflow courant
+    - name: Exiger la preuve TCP du workflow courant
       ansible.builtin.assert:
         that:
-          - wait_report.workflow_id | string == workflow_id
-          - wait_report.hostname == inventory_hostname
-          - wait_report.selected_hosts | sort == ansible_play_hosts_all | sort
-          - wait_report.status == 'ssh_port_reachable'
-          - wait_report.ssh_port_reachable | bool
+          - wait_report.stage | default('') == 'jt05_wait_ssh'
+          - wait_report.workflow_id | default('') | string == workflow_id
+          - wait_report.hostname | default('') == inventory_hostname
+          - (wait_report.selected_hosts | default([]) | sort) == (ansible_play_hosts_all | sort)
+          - wait_report.status | default('') == 'ssh_port_reachable'
+          - wait_report.ssh_port_reachable | default(false) | bool
     - name: Lire show version
       ansible.netcommon.cli_command:
         command: show version
@@ -62,7 +66,7 @@
         running_after: "{{ version_after.stdout | regex_findall('(?m)^\\s*(WC\\.\\d+\\.\\d+\\.\\d+)\\s*$') }}"
         active_after: "{{ version_after.stdout | regex_findall('(?im)^Boot Image:\\s*(Primary|Secondary)\\s*$') }}"
         default_after: "{{ flash_after.stdout | regex_findall('(?im)^Default Boot Image\\s*:\\s*(Primary|Secondary)\\s*$') }}"
-    - name: Verifier la mise a niveau et le repli Primary
+    - name: Verifier les versions et l'image active
       ansible.builtin.assert:
         that:
           - primary_after | length == 1
@@ -75,11 +79,11 @@
           - running_after[0] == aruba_firmware_target.version
           - active_after[0] == 'Secondary'
           - default_after[0] == 'Secondary'
-        fail_msg: "POSTCHECK ECHEC : ne pas poursuivre vers une ecriture Primary."
-    - name: Barriere globale postcheck
+        fail_msg: "POSTCHECK ECHEC : bloquer toute ecriture Primary."
+    - name: Marquer le postcheck valide
       ansible.builtin.set_fact:
         jt06_postcheck_ok: true
-    - name: Exiger la reussite de tous les switches
+    - name: Barriere globale postcheck
       ansible.builtin.assert:
         that:
           - (ansible_play_hosts_all | map('extract', hostvars, 'jt06_postcheck_ok') | select('equalto', true) | list | length) == (ansible_play_hosts_all | length)
@@ -88,7 +92,7 @@
         dest: "{{ report_dir }}/postcheck_v06.json"
         mode: '0600'
         content: |
-          {{ {'stage': 'jt06_postcheck', 'status': 'passed', 'workflow_id': workflow_id, 'hostname': inventory_hostname, 'selected_hosts': ansible_play_hosts_all | sort, 'primary': primary_after[0], 'secondary': secondary_after[0], 'running': running_after[0], 'active_image': active_after[0], 'default_image': default_after[0], 'reboot_executed_by_jt06': false} | to_nice_json }}
+          {{ {'stage': 'jt06_postcheck', 'status': 'passed', 'workflow_id': workflow_id, 'hostname': inventory_hostname, 'selected_hosts': ansible_play_hosts_all | sort, 'primary': primary_after[0], 'secondary': secondary_after[0], 'running': running_after[0], 'active_image': active_after[0], 'default_image': default_after[0], 'reboot_executed_by_jt06': false, 'reboot_independently_verified': false} | to_nice_json }}
       delegate_to: localhost
       vars:
         ansible_connection: local
