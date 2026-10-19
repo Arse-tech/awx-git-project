@@ -1,0 +1,229 @@
+---
+# JT08 V08.0 - Primary SW-2. Simulation par defaut.
+# Aucune modification du boot ni reboot. Ne jamais rejouer une copie incertaine automatiquement.
+- name: JT08 - Controle et transfert eventuel vers Primary
+  hosts: all
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  vars_files:
+    - ../vars/aruba_firmware_devices.yml
+  vars:
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_network_os: arubanetworks.aos_switch.arubaoss
+    ansible_command_timeout: 120
+    workflow_id: "{{ awx_workflow_job_id | default('', true) | string }}"
+    report_dir: "/awx-storage/reports/aruba/{{ inventory_hostname }}/workflow-{{ workflow_id }}"
+    preflight_path: "{{ report_dir }}/primary_preflight_v07.json"
+    report_path: "{{ report_dir }}/primary_upgrade_v08.json"
+    firmware_tftp_server: "172.16.23.162"
+    firmware_tftp_path: "aruba/2930F/WC_16_11_0030.swi"
+    expected_sha256: "4749334ebdb4989c6176643b2daf57514441348778899895dc08d1c1d546e42d"
+    expected_size: 30294326
+    primary_mode: "{{ jt08_execution_mode | default('simulate') | lower }}"
+  tasks:
+    - name: Verrouiller strictement SW-2, le workflow et le mode
+      ansible.builtin.assert:
+        that:
+          - workflow_id is match('^[0-9]+$')
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname == 'CSE-LAB-B01-ARU-SW-2'
+          - ansible_limit is defined
+          - (ansible_limit | default('') | trim) == inventory_hostname
+          - inventory_hostname in (jt04_allowed_hosts | default([]))
+          - inventory_hostname in aruba_firmware_devices
+          - device_vendor | default('') | lower == 'aruba'
+          - primary_mode in ['simulate', 'transfer']
+          - aruba_firmware_target.version == 'WC.16.11.0030'
+          - aruba_firmware_target.sha256 == expected_sha256
+          - aruba_firmware_target.size_bytes | int == expected_size
+        fail_msg: "JT08 STOP : perimetre, version, empreinte ou mode incorrect."
+
+    - name: Verifier le montage NFS
+      ansible.builtin.command: mountpoint -q /awx-storage
+      delegate_to: localhost
+      vars: {ansible_connection: local}
+      changed_when: false
+
+    - name: Verifier le rapport JT07
+      ansible.builtin.stat:
+        path: "{{ preflight_path }}"
+      register: preflight_stat
+      delegate_to: localhost
+      vars: {ansible_connection: local}
+
+    - name: Exiger le rapport JT07
+      ansible.builtin.assert:
+        that:
+          - preflight_stat.stat.isreg | default(false) | bool
+        fail_msg: "JT07 absent : Primary interdit."
+
+    - name: Lire le rapport JT07
+      ansible.builtin.slurp:
+        src: "{{ preflight_path }}"
+      register: preflight_raw
+      delegate_to: localhost
+      vars: {ansible_connection: local}
+      no_log: true
+
+    - name: Decoder le rapport JT07
+      ansible.builtin.set_fact:
+        preflight: "{{ preflight_raw.content | b64decode | from_json }}"
+      no_log: true
+
+    - name: Exiger la preuve JT07 du workflow courant
+      ansible.builtin.assert:
+        that:
+          - preflight.stage | default('') == 'jt07_primary_preflight'
+          - preflight.status | default('') == 'read_only_passed'
+          - preflight.workflow_id | default('') | string == workflow_id
+          - preflight.hostname | default('') == inventory_hostname
+          - (preflight.selected_hosts | default([]) | sort) == (ansible_play_hosts_all | sort)
+          - preflight.primary | default('') == aruba_firmware_devices[inventory_hostname].primary_before
+          - preflight.secondary | default('') == aruba_firmware_target.version
+          - preflight.running | default('') == aruba_firmware_target.version
+          - preflight.active_image | default('') == 'Secondary'
+          - preflight.default_image | default('') == 'Secondary'
+          - not (preflight.primary_write_authorized | default(true) | bool)
+          - not (preflight.device_modified | default(true) | bool)
+        fail_msg: "Preuve JT07 incoherente : Primary interdit."
+
+    - name: Lire show version
+      ansible.netcommon.cli_command:
+        command: show version
+      register: version_live
+      changed_when: false
+
+    - name: Lire show flash
+      ansible.netcommon.cli_command:
+        command: show flash
+      register: flash_live
+      changed_when: false
+
+    - name: Extraire les images et l'etat de boot
+      ansible.builtin.set_fact:
+        primary_live: "{{ flash_live.stdout | regex_findall('(?im)^Primary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+        secondary_live: "{{ flash_live.stdout | regex_findall('(?im)^Secondary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+        running_live: "{{ version_live.stdout | regex_findall('(?m)^\\s*(WC\\.\\d+\\.\\d+\\.\\d+)\\s*$') }}"
+        active_live: "{{ version_live.stdout | regex_findall('(?im)^Boot Image:\\s*(Primary|Secondary)\\s*$') }}"
+        default_live: "{{ flash_live.stdout | regex_findall('(?im)^Default Boot Image\\s*:\\s*(Primary|Secondary)\\s*$') }}"
+
+    - name: Exiger Secondary active et intacte avant toute copie
+      ansible.builtin.assert:
+        that:
+          - primary_live | length == 1
+          - secondary_live | length == 1
+          - running_live | length == 1
+          - active_live | length == 1
+          - default_live | length == 1
+          - primary_live[0] in [aruba_firmware_devices[inventory_hostname].primary_before, aruba_firmware_target.version]
+          - secondary_live[0] == aruba_firmware_target.version
+          - running_live[0] == aruba_firmware_target.version
+          - active_live[0] == 'Secondary'
+          - default_live[0] == 'Secondary'
+        fail_msg: "Etat flash/boot non conforme : ne pas ecrire Primary."
+
+    - name: Verifier si une tentative JT08 existe deja
+      ansible.builtin.stat:
+        path: "{{ report_path }}"
+      register: prior_attempt
+      delegate_to: localhost
+      vars: {ansible_connection: local}
+
+    - name: Simulation - afficher le plan sans ecriture
+      ansible.builtin.debug:
+        msg:
+          - "JT08 simulation : aucune ecriture ni reboot"
+          - "Switch {{ inventory_hostname }}"
+          - "Primary {{ primary_live[0] }}, Secondary {{ secondary_live[0] }}"
+          - "Cible {{ aruba_firmware_target.version }}"
+      when: primary_mode == 'simulate'
+
+    - name: Transfert Primary sous verrous explicites
+      when: primary_mode == 'transfer'
+      block:
+        - name: Exiger autorisations, validation du prompt et absence de tentative
+          ansible.builtin.assert:
+            that:
+              - jt08_primary_transfer_authorized | default(false) | bool
+              - jt08_primary_flash_risk_accepted | default(false) | bool
+              - jt08_primary_prompt_validated | default(false) | bool
+              - jt08_primary_prompt_regex is defined
+              - (jt08_primary_prompt_regex | default('') | length) > 10
+              - not (prior_attempt.stat.exists | default(false) | bool)
+            fail_msg: "Ecriture Primary non autorisee ou tentative precedente : STOP."
+
+        - name: Confirmer la source locale du firmware
+          ansible.builtin.stat:
+            path: "{{ aruba_firmware_target.local_path }}"
+            checksum_algorithm: sha256
+            get_checksum: true
+          register: image_stat
+          delegate_to: localhost
+          vars: {ansible_connection: local}
+
+        - name: Exiger taille et SHA256 du fichier source
+          ansible.builtin.assert:
+            that:
+              - image_stat.stat.isreg | default(false) | bool
+              - image_stat.stat.size | int == expected_size
+              - image_stat.stat.checksum == expected_sha256
+
+        - name: Archiver la tentative AVANT toute ecriture Primary
+          ansible.builtin.copy:
+            dest: "{{ report_path }}"
+            mode: '0600'
+            force: false
+            content: |
+              {{ {'stage':'jt08_primary_upgrade','status':'copy_attempt_uncertain','workflow_id':workflow_id,'hostname':inventory_hostname,'selected_hosts':ansible_play_hosts_all | sort,'target_version':aruba_firmware_target.version,'primary_before':primary_live[0],'secondary_before':secondary_live[0],'reboot_requested':false,'manual_reconciliation_required':true} | to_nice_json }}
+          delegate_to: localhost
+          vars: {ansible_connection: local}
+          when: primary_live[0] != aruba_firmware_target.version
+
+        - name: Copier vers Primary uniquement si version differente
+          ansible.netcommon.cli_command:
+            command: "copy tftp flash {{ firmware_tftp_server }} {{ firmware_tftp_path }} primary"
+            prompt:
+              - "{{ jt08_primary_prompt_regex }}"
+            answer: ['y']
+            check_all: true
+          register: copy_result
+          vars: {ansible_command_timeout: 1200}
+          changed_when: true
+          when: primary_live[0] != aruba_firmware_target.version
+
+        - name: Relire show flash apres transfert
+          ansible.netcommon.cli_command:
+            command: show flash
+          register: flash_after
+          changed_when: false
+
+        - name: Extraire les images et boot apres transfert
+          ansible.builtin.set_fact:
+            primary_after: "{{ flash_after.stdout | regex_findall('(?im)^Primary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+            secondary_after: "{{ flash_after.stdout | regex_findall('(?im)^Secondary Image\\s*:\\s*\\d+\\s+\\S+\\s+(WC\\.\\d+\\.\\d+\\.\\d+)') }}"
+            default_after: "{{ flash_after.stdout | regex_findall('(?im)^Default Boot Image\\s*:\\s*(Primary|Secondary)\\s*$') }}"
+
+        - name: Exiger Primary cible, Secondary intacte et boot inchange
+          ansible.builtin.assert:
+            that:
+              - primary_after | length == 1
+              - secondary_after | length == 1
+              - default_after | length == 1
+              - primary_after[0] == aruba_firmware_target.version
+              - secondary_after[0] == aruba_firmware_target.version
+              - default_after[0] == 'Secondary'
+            fail_msg: "Etat final incertain : STOP et verification manuelle, jamais de retry aveugle."
+
+        - name: Archiver la verification de Primary sans reboot
+          ansible.builtin.copy:
+            dest: "{{ report_path }}"
+            mode: '0600'
+            content: |
+              {{ {'stage':'jt08_primary_upgrade','status':'primary_image_verified','workflow_id':workflow_id,'hostname':inventory_hostname,'selected_hosts':ansible_play_hosts_all | sort,'target_version':aruba_firmware_target.version,'primary':primary_after[0],'secondary':secondary_after[0],'active_image':'Secondary','default_image':default_after[0],'reboot_requested':false,'primary_version_verified':true,'primary_binary_hash_on_device_verified':false} | to_nice_json }}
+          delegate_to: localhost
+          vars: {ansible_connection: local}
+
+    - name: Fin JT08
+      ansible.builtin.debug:
+        msg: "JT08 termine en mode {{ primary_mode }} ; aucun reboot demande."
